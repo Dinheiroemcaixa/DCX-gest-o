@@ -1,9 +1,9 @@
 -- ==============================================================================
 -- DCX GESTÃO — SCHEMA OFICIAL DO BANCO DE DADOS (SUPABASE / POSTGRESQL)
 -- ==============================================================================
--- Arquitetura: Multi-tenant Lógico, RLS Rígido, Funções Security Definer Blindadas,
--- Imutabilidade de Auditoria, Proteção Contra Auto-Elevação de Privilégios e
--- Procedimento Controlado de Ativação do Primeiro Proprietário.
+-- Arquitetura: RLS Rígido, Multi-tenant Lógico, Funções Security Definer Blindadas,
+-- Dupla Proteção de Privilégios (DCL + RLS), Imutabilidade Estrita de Auditoria,
+-- Isolamento Pessoal de Tarefas e Ativação Segura do Primeiro Proprietário.
 -- ==============================================================================
 
 -- 0. EXTENSÕES NECESSÁRIAS
@@ -371,10 +371,10 @@ $$;
 
 -- Blindagem de acesso da função: Nunca acessível via API REST
 REVOKE ALL ON FUNCTION public.promover_primeiro_proprietario(TEXT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.promover_primeiro_proprietario(TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.promover_primeiro_proprietario(TEXT) TO postgres, service_role;
 
 -- ==============================================================================
--- POLÍTICAS RLS (ROW LEVEL SECURITY)
+-- ATIVAÇÃO DE RLS EM TODAS AS TABELAS
 -- ==============================================================================
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
@@ -386,6 +386,45 @@ ALTER TABLE public.subtasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.task_audit_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.meetings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+
+-- ==============================================================================
+-- DUPLA CAMADA DE SEGURANÇA: PRIVILÉGIOS DCL EXPLÍCITOS
+-- ==============================================================================
+
+-- Tabela Profiles: Inserção PROIBIDA para API pública (feita exclusivamente via trigger handle_new_user)
+REVOKE INSERT ON public.profiles FROM PUBLIC, anon, authenticated;
+GRANT SELECT, UPDATE ON public.profiles TO authenticated;
+
+-- Tabela Auditoria: Estritamente Append-Only (UPDATE e DELETE PROIBIDOS para qualquer role de API)
+REVOKE UPDATE, DELETE ON public.task_audit_logs FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON public.task_audit_logs TO authenticated;
+
+-- Tabela Versões de POPs: Imutabilidade de Conteúdo Aprovado (UPDATE PROIBIDO)
+REVOKE UPDATE ON public.pop_versions FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, DELETE ON public.pop_versions TO authenticated;
+
+-- Tabelas Operacionais Gerais
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.tasks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.subtasks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.pop_categories TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.pops TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.meetings TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.messages TO authenticated;
+
+-- Role Anon (Não autenticados): Acesso totalmente bloqueado aos dados operacionais
+REVOKE ALL ON public.profiles FROM anon;
+REVOKE ALL ON public.tasks FROM anon;
+REVOKE ALL ON public.subtasks FROM anon;
+REVOKE ALL ON public.task_audit_logs FROM anon;
+REVOKE ALL ON public.pop_categories FROM anon;
+REVOKE ALL ON public.pops FROM anon;
+REVOKE ALL ON public.pop_versions FROM anon;
+REVOKE ALL ON public.meetings FROM anon;
+REVOKE ALL ON public.messages FROM anon;
+
+-- ==============================================================================
+-- POLÍTICAS RLS (ROW LEVEL SECURITY)
+-- ==============================================================================
 
 -- ── 1. POLÍTICAS: PROFILES ───────────────────────────────────────────────────
 DROP POLICY IF EXISTS "profiles_select_policy" ON public.profiles;
@@ -412,25 +451,24 @@ CREATE POLICY "profiles_update_policy" ON public.profiles FOR UPDATE TO authenti
         OR (id = auth.uid() AND public.is_approved())
     );
 
--- INSERT em profiles é proibido via API: acontece exclusivamente pelo gatilho handle_new_user()
-DROP POLICY IF EXISTS "profiles_insert_block" ON public.profiles;
-
 -- DELETE de perfis: Apenas o Proprietário pode excluir colaboradores
 DROP POLICY IF EXISTS "profiles_delete_policy" ON public.profiles;
 CREATE POLICY "profiles_delete_policy" ON public.profiles FOR DELETE TO authenticated
     USING (public.is_proprietario());
 
--- ── 2. POLÍTICAS: TASKS ─────────────────────────────────────────────────────
--- Usuários pendentes ou suspensos NÃO possuem acesso algum a tarefas
+-- ── 2. POLÍTICAS: TASKS (ISOLAMENTO ESTRITO OPERADOR VS. EQUIPE) ──────────────
+-- Regra de Ouro:
+-- • Operador aprovado consulta e atualiza EXCLUSIVAMENTE tarefas atribuídas a ele (assigned_to = auth.uid()).
+-- • Operador NÃO consulta tarefas de outros colegas apenas porque as criou no passado (created_by não concede leitura).
+-- • Proprietário e Gestora aprovados possuem acesso gerencial a todas as tarefas da equipe.
 DROP POLICY IF EXISTS "tasks_select_policy" ON public.tasks;
 CREATE POLICY "tasks_select_policy" ON public.tasks FOR SELECT TO authenticated
     USING (
         public.is_approved() AND (
-            -- Gestora e Proprietário podem auditar todas as tarefas da equipe
+            -- Gestora e Proprietário auditam e acompanham toda a equipe
             public.is_gestora_or_above()
-            -- Operadores visualizam estritamente as tarefas atribuídas a eles ou criadas por eles
-            OR assigned_to = auth.uid() 
-            OR created_by = auth.uid()
+            -- Operador vê estritamente o que está sob sua responsabilidade
+            OR assigned_to = auth.uid()
         )
     );
 
@@ -440,9 +478,8 @@ CREATE POLICY "tasks_insert_policy" ON public.tasks FOR INSERT TO authenticated
         public.is_approved() AND (
             -- Gestora e Proprietário podem criar e atribuir para qualquer membro da equipe
             public.is_gestora_or_above()
-            -- Operadores só podem criar tarefas onde são os responsáveis ou criadores
-            OR assigned_to = auth.uid() 
-            OR created_by = auth.uid()
+            -- Operador só cria tarefas atribuídas a si mesmo
+            OR (assigned_to = auth.uid() AND created_by = auth.uid())
         )
     );
 
@@ -452,15 +489,15 @@ CREATE POLICY "tasks_update_policy" ON public.tasks FOR UPDATE TO authenticated
         public.is_approved() AND (
             -- Gestora e Proprietário podem atualizar qualquer tarefa
             public.is_gestora_or_above()
-            -- Operadores atualizam tarefas sob sua responsabilidade (conclusão, reabertura, transferência)
+            -- Operador pode atualizar apenas tarefas atualmente sob sua responsabilidade
             OR assigned_to = auth.uid()
         )
     )
     WITH CHECK (
         public.is_approved() AND (
             public.is_gestora_or_above() 
-            OR assigned_to = auth.uid() 
-            -- Permite transferir caso a nova atribuição seja para outro colega aprovado
+            -- Operador mantém a tarefa atribuída a si OU transfere para outro colega aprovado
+            OR (assigned_to = auth.uid())
             OR EXISTS (SELECT 1 FROM public.profiles WHERE id = assigned_to AND status = 'aprovado')
         )
     );
@@ -478,18 +515,18 @@ CREATE POLICY "subtasks_all_policy" ON public.subtasks FOR ALL TO authenticated
     USING (
         public.is_approved() AND (
             public.is_gestora_or_above() OR 
-            task_id IN (SELECT id FROM public.tasks WHERE assigned_to = auth.uid() OR created_by = auth.uid())
+            task_id IN (SELECT id FROM public.tasks WHERE assigned_to = auth.uid())
         )
     )
     WITH CHECK (
         public.is_approved() AND (
             public.is_gestora_or_above() OR 
-            task_id IN (SELECT id FROM public.tasks WHERE assigned_to = auth.uid() OR created_by = auth.uid())
+            task_id IN (SELECT id FROM public.tasks WHERE assigned_to = auth.uid())
         )
     );
 
 -- ── 4. POLÍTICAS: AUDITORIA DE TAREFAS (APPEND-ONLY) ────────────────────────
--- Logs de auditoria são imutáveis: NÃO possuem políticas de UPDATE nem de DELETE
+-- Imutabilidade Absoluta: Sem políticas de UPDATE ou DELETE
 DROP POLICY IF EXISTS "audit_select_policy" ON public.task_audit_logs;
 CREATE POLICY "audit_select_policy" ON public.task_audit_logs FOR SELECT TO authenticated
     USING (public.is_approved());

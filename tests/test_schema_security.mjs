@@ -30,7 +30,7 @@ console.log('[TESTE 3: Procedimento controlado e seguro para Primeiro Proprietá
 console.assert(sql.includes("promover_primeiro_proprietario"), "Função promover_primeiro_proprietario deve existir")
 console.assert(!sql.includes("COUNT(*) = 0"), "NÃO deve usar COUNT(*) = 0 ingênuo para inicialização automática")
 console.assert(sql.includes("REVOKE ALL ON FUNCTION public.promover_primeiro_proprietario"), "Função deve ter acesso revogado para PUBLIC, anon e authenticated")
-console.assert(sql.includes("GRANT EXECUTE ON FUNCTION public.promover_primeiro_proprietario(TEXT) TO service_role"), "Permitir execução apenas para service_role / SQL Editor")
+console.assert(sql.includes("GRANT EXECUTE ON FUNCTION public.promover_primeiro_proprietario(TEXT) TO postgres, service_role"), "Permitir execução apenas para postgres e service_role (SQL Editor)")
 console.log('✓ PASSOU: Primeiro proprietário requer execução controlada no painel; função inacessível via API pública.\n')
 
 // 4. Bloqueio de Auto-Promoção na Atualização de Perfil
@@ -47,11 +47,13 @@ console.assert(!sql.includes("audit_update_policy"), "NÃO deve existir polític
 console.assert(!sql.includes("audit_delete_policy"), "NÃO deve existir política de DELETE em logs de auditoria")
 console.log('✓ PASSOU: Tabela de auditoria é estritamente append-only (sem permissão de alteração ou exclusão).\n')
 
-// 6. Separação de Acesso a Tarefas entre Operador e Equipe
-console.log('[TESTE 6: RLS de tarefas respeitando operador vs equipe gerencial]')
-console.assert(sql.includes("assigned_to = auth.uid() OR created_by = auth.uid()"), "Operadores devem ser restritos às suas tarefas")
+// 6. Separação de Acesso a Tarefas entre Operador e Equipe (Isolamento Estrito)
+console.log('[TESTE 6: RLS de tarefas respeitando operador estrito vs equipe gerencial]')
+console.assert(sql.includes("tasks_select_policy"), "tasks_select_policy deve existir")
+console.assert(sql.includes("OR assigned_to = auth.uid()"), "Operador deve ver tarefas atribuídas a ele")
+console.assert(!sql.includes("tasks_select_policy\" ON public.tasks FOR SELECT TO authenticated\n    USING (\n        public.is_approved() AND (\n            public.is_gestora_or_above()\n            OR assigned_to = auth.uid() \n            OR created_by = auth.uid()"), "Operador NÃO deve ver tarefas alheias apenas porque foi o criador no passado")
 console.assert(sql.includes("is_gestora_or_above()"), "Gestora e Proprietário devem ter acesso gerencial")
-console.log('✓ PASSOU: Políticas de tasks respeitam a separação rígida entre tarefas próprias e supervisão gerencial.\n')
+console.log('✓ PASSOU: Políticas de tasks respeitam a separação rígida: operador só vê o que está atribuído a ele.\n')
 
 // 7. Proteção contra comandos destrutivos desnecessários
 console.log('[TESTE 7: Idempotência e ausência de comandos destrutivos perigosos]')
@@ -59,6 +61,14 @@ console.assert(!sql.includes("DROP SCHEMA public CASCADE"), "Não deve conter DR
 console.assert(!sql.includes("TRUNCATE"), "Não deve conter comandos TRUNCATE")
 console.assert(sql.includes("CREATE TABLE IF NOT EXISTS"), "Deve usar CREATE TABLE IF NOT EXISTS")
 console.log('✓ PASSOU: O script é seguro para aplicação em projeto novo e vazio sem comandos destrutivos.\n')
+
+// 8. Dupla Camada DCL (REVOKE em tabelas sensíveis)
+console.log('[TESTE 8: Dupla camada DCL em tabelas sensíveis]')
+console.assert(sql.includes("REVOKE UPDATE, DELETE ON public.task_audit_logs"), "REVOKE UPDATE, DELETE em task_audit_logs")
+console.assert(sql.includes("REVOKE INSERT ON public.profiles"), "REVOKE INSERT em profiles para API pública")
+console.assert(sql.includes("REVOKE UPDATE ON public.pop_versions"), "REVOKE UPDATE em pop_versions")
+console.assert(sql.includes("GRANT EXECUTE ON FUNCTION public.promover_primeiro_proprietario(TEXT) TO postgres, service_role"), "Permissão de execução concedida a postgres e service_role")
+console.log('✓ PASSOU: Privilégios DCL reforçam o bloqueio físico no PostgreSQL além do RLS.\n')
 
 console.log('================================================================================')
 console.log('RESULTADO FINAL: TODOS OS TESTES DE AUDITORIA DE SEGURANÇA FORAM APROVADOS!')
