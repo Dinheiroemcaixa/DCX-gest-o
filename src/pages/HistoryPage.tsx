@@ -13,13 +13,8 @@ export const HistoryPage: React.FC<HistoryPageProps> = ({ tasks, onReopenTask })
   const [filterPeriod, setFilterPeriod] = useState<number>(30) // dias
   const [search, setSearch] = useState('')
 
-  // Filtra tarefas concluídas
-  let completed = tasks.filter(t => t.status === 'Concluida')
-
-  // Se for operador, vê apenas o próprio histórico
-  if (isOperador && currentUser) {
-    completed = completed.filter(t => t.assigned_to === currentUser.id || t.completed_by === currentUser.id)
-  }
+  // Regra Pessoal Aprovada: Cada usuário autenticado vê exclusivamente o SEU histórico pessoal
+  let completed = tasks.filter(t => t.status === 'Concluida' && (t.assigned_to === currentUser?.id || t.completed_by === currentUser?.id))
 
   // Filtro de busca
   if (search.trim()) {

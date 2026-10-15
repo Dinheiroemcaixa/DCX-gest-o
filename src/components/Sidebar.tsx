@@ -90,7 +90,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activePage, setActivePage, lat
           style={{ justifyContent: 'flex-start', padding: '9px 12px', width: '100%' }}
         >
           <CheckSquare size={17} />
-          <span>{isOperador ? 'Minhas Tarefas' : 'Tarefas da Equipe'}</span>
+          <span>Minhas Tarefas</span>
         </button>
 
         <button

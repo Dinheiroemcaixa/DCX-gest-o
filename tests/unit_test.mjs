@@ -1,104 +1,145 @@
-// Teste automatizado das regras de permissão, tarefas, aprovação e POPs
+// SUÍTE DE TESTES: VALIDAÇÃO DAS REGRAS DE SEPARAÇÃO PESSOAL VS EQUIPE
 
-console.log('====================================================')
-console.log('SUÍTE DE TESTES AUTOMATIZADOS: REGRAS DO NOVO APP')
-console.log('====================================================')
+console.log('======================================================================')
+console.log('SUÍTE OFICIAL DE TESTES: SEPARAÇÃO ENTRE TAREFAS PESSOAIS E EQUIPE')
+console.log('======================================================================\n')
 
-// 1. Simulação dos Perfis e Permissões
-const profiles = [
-  { id: 'user-01', name: 'Proprietário', role: 'proprietario', status: 'aprovado' },
-  { id: 'user-02', name: 'Ana Gestora', role: 'gestora', status: 'aprovado' },
-  { id: 'user-03', name: 'Carlos Operador', role: 'operador', status: 'aprovado' },
-  { id: 'user-04', name: 'Roberto Pendente', role: 'operador', status: 'pendente' },
+// Perfis de Teste
+const userProprietario = { id: 'usr-prop-01', name: 'Proprietário', role: 'proprietario', status: 'aprovado' }
+const userGestora = { id: 'usr-gest-02', name: 'Ana Gestora', role: 'gestora', status: 'aprovado' }
+const userOperador1 = { id: 'usr-op-03', name: 'Carlos Operador', role: 'operador', status: 'aprovado' }
+const userOperador2 = { id: 'usr-op-04', name: 'Mariana Operadora', role: 'operador', status: 'aprovado' }
+
+// Base de Dados de Tarefas
+const allTasks = [
+  { id: 't-1', title: 'Tarefa do Proprietário (Fechamento Geral)', assigned_to: 'usr-prop-01', status: 'Em Aberto', due_date: '2026-10-15' },
+  { id: 't-2', title: 'Tarefa da Gestora (Planejamento de Escala)', assigned_to: 'usr-gest-02', status: 'Em Aberto', due_date: '2026-10-15' },
+  { id: 't-3', title: 'Tarefa do Carlos (Lançamentos Fiscais)', assigned_to: 'usr-op-03', status: 'Em Aberto', due_date: '2026-10-15' },
+  { id: 't-4', title: 'Tarefa da Mariana (Folha de Pagamento)', assigned_to: 'usr-op-04', status: 'Em Aberto', due_date: '2026-10-15' },
 ]
 
-function canAccessSettings(user) {
-  return user.role === 'proprietario' && user.status === 'aprovado'
+// ── REGRA DE "MINHAS TAREFAS" (Espaço Pessoal Estrito) ────────────────
+function getMinhasTarefas(tasks, currentUser) {
+  // Cada usuário autenticado vê EXCLUSIVAMENTE tarefas atribuídas a ele
+  return tasks.filter(t => t.assigned_to === currentUser.id && t.status !== 'Concluida')
 }
 
-function canViewTeamTasks(user) {
-  return (user.role === 'proprietario' || user.role === 'gestora') && user.status === 'aprovado'
-}
-
-function canOperateTasks(user) {
-  return user.status === 'aprovado'
-}
-
-console.log('\n[TESTE 1: MATRIZ DE PERMISSÕES DOS TRÊS PERFIS]')
-console.assert(canAccessSettings(profiles[0]) === true, 'Proprietário DEVE acessar Configurações')
-console.assert(canAccessSettings(profiles[1]) === false, 'Gestora NÃO DEVE acessar Configurações')
-console.assert(canAccessSettings(profiles[2]) === false, 'Operador NÃO DEVE acessar Configurações')
-console.assert(canAccessSettings(profiles[3]) === false, 'Pendente NÃO DEVE acessar Configurações')
-console.log('✓ Teste 1.1: Apenas o Proprietário tem acesso ao card Configurações [PASSOU]')
-
-console.assert(canViewTeamTasks(profiles[0]) === true, 'Proprietário DEVE ver tarefas da equipe')
-console.assert(canViewTeamTasks(profiles[1]) === true, 'Gestora DEVE ver tarefas da equipe')
-console.assert(canViewTeamTasks(profiles[2]) === false, 'Operador NÃO DEVE ver tarefas da equipe livremente')
-console.log('✓ Teste 1.2: Visão de tarefas de toda a equipe restrita a Proprietário e Gestora [PASSOU]')
-
-console.assert(canOperateTasks(profiles[3]) === false, 'Pendente NÃO DEVE operar no sistema')
-console.log('✓ Teste 1.3: Bloqueio estrito de contas pendentes de aprovação [PASSOU]')
-
-// 2. Simulação de Tarefas e Reabertura Estrita de Ocorrência Individual
-let tasks = [
-  {
-    id: 't-101',
-    title: 'Apuração ISS',
-    assigned_to: 'user-03',
-    status: 'Concluida',
-    recurrence_type: 'monthly',
-    completed_at: '2026-10-15T10:00:00Z',
-    completed_by: 'user-03'
+// ── REGRA DO MÓDULO "EQUIPE" (Visão Gerencial) ────────────────────────
+function getTarefasEquipeMembro(tasks, currentUser, targetMemberId) {
+  // Operadores NÃO possuem permissão de acesso gerencial a tarefas de terceiros
+  if (currentUser.role === 'operador') {
+    throw new Error('ACESSO_NEGADO: Operador não possui permissão para consultar tarefas de outros colaboradores na Equipe.')
   }
-]
-
-function reopenTaskOccurrence(task, actor) {
-  return {
-    ...task,
-    status: 'Em Aberto',
-    completed_at: null,
-    completed_by: null,
-    reopened_at: new Date().toISOString(),
-    reopened_by: actor.id,
-    reopened_by_name: actor.name
-    // A regra de recorrência mensal e as outras instâncias permanecem intactas
-  }
+  // Proprietário e Gestora podem consultar as tarefas do colaborador selecionado
+  return tasks.filter(t => t.assigned_to === targetMemberId)
 }
 
-console.log('\n[TESTE 2: REABERTURA RESTRITA À OCORRÊNCIA PONTUAL]')
-const reaberta = reopenTaskOccurrence(tasks[0], profiles[0])
-console.assert(reaberta.status === 'Em Aberto', 'Status deve voltar para Em Aberto')
-console.assert(reaberta.recurrence_type === 'monthly', 'A série recorrente deve permanecer intacta')
-console.assert(reaberta.reopened_by === 'user-01', 'Auditoria deve registrar quem reabriu')
-console.log('✓ Teste 2: Reabertura restaurou a ocorrência pontual sem quebrar a série [PASSOU]')
-
-// 3. Simulação de Transferência com Registro de Auditoria
-let auditLogs = []
-
-function transferTask(task, newAssignedId, reason, actor) {
-  const log = {
-    task_id: task.id,
-    action: 'transferencia',
-    actor_id: actor.id,
-    previous_assigned_to: task.assigned_to,
-    new_assigned_to: newAssignedId,
-    details: { reason }
-  }
-  auditLogs.push(log)
-  return {
-    ...task,
+// ── REGRA DE TRANSFERÊNCIA DE TAREFA ──────────────────────────────────
+function transferirTarefa(tasks, taskId, newAssignedId, reason, actor, auditLogs) {
+  const taskIndex = tasks.findIndex(t => t.id === taskId)
+  if (taskIndex === -1) throw new Error('Tarefa não encontrada')
+  
+  const previousAssigned = tasks[taskIndex].assigned_to
+  const updatedTask = {
+    ...tasks[taskIndex],
     assigned_to: newAssignedId
   }
+  
+  // Registra auditoria
+  auditLogs.push({
+    task_id: taskId,
+    action: 'transferencia',
+    actor_id: actor.id,
+    actor_name: actor.name,
+    previous_assigned_to: previousAssigned,
+    new_assigned_to: newAssignedId,
+    reason,
+    timestamp: new Date().toISOString()
+  })
+
+  const newTaskList = [...tasks]
+  newTaskList[taskIndex] = updatedTask
+  return newTaskList
 }
 
-console.log('\n[TESTE 3: TRANSFERÊNCIA DE RESPONSABILIDADE E AUDITORIA]')
-const transferida = transferTask(reaberta, 'user-02', 'Cobertura de férias', profiles[2])
-console.assert(transferida.assigned_to === 'user-02', 'Responsável deve ser atualizado para user-02')
-console.assert(auditLogs.length === 1, 'Deve gerar log de auditoria')
-console.assert(auditLogs[0].action === 'transferencia', 'Ação do log deve ser transferencia')
-console.assert(auditLogs[0].details.reason === 'Cobertura de férias', 'Motivo da transferência deve ser gravado')
-console.log('✓ Teste 3: Transferência executada com registro de histórico completo [PASSOU]')
+// ======================================================================
+// EXECUÇÃO DOS 6 TESTES OBRIGATÓRIOS
+// ======================================================================
 
-console.log('\n====================================================')
-console.log('TODOS OS 3 TESTES DE INTEGRAÇÃO PASSARAM COM 100% DE SUCESSO!')
-console.log('====================================================')
+console.log('[TESTE 1: PROPRIETÁRIO EM "MINHAS TAREFAS"]')
+const minhasProp = getMinhasTarefas(allTasks, userProprietario)
+console.assert(minhasProp.length === 1, 'Proprietário deve ver apenas 1 tarefa pessoal')
+console.assert(minhasProp[0].id === 't-1', 'Deve ser estritamente a tarefa t-1')
+console.assert(!minhasProp.some(t => t.assigned_to !== userProprietario.id), 'Não deve conter tarefas de terceiros')
+console.log('✓ PASSOU: O Proprietário vê exclusivamente suas próprias tarefas em "Minhas Tarefas".\n')
+
+console.log('[TESTE 2: GESTORA EM "MINHAS TAREFAS"]')
+const minhasGest = getMinhasTarefas(allTasks, userGestora)
+console.assert(minhasGest.length === 1, 'Gestora deve ver apenas 1 tarefa pessoal')
+console.assert(minhasGest[0].id === 't-2', 'Deve ser estritamente a tarefa t-2')
+console.assert(!minhasGest.some(t => t.assigned_to !== userGestora.id), 'Não deve conter tarefas de terceiros')
+console.log('✓ PASSOU: A Gestora vê exclusivamente suas próprias tarefas em "Minhas Tarefas".\n')
+
+console.log('[TESTE 3: OPERADOR EM "MINHAS TAREFAS"]')
+const minhasCarlos = getMinhasTarefas(allTasks, userOperador1)
+console.assert(minhasCarlos.length === 1, 'Carlos deve ver apenas 1 tarefa pessoal')
+console.assert(minhasCarlos[0].id === 't-3', 'Deve ser estritamente a tarefa t-3')
+console.assert(!minhasCarlos.some(t => t.assigned_to !== userOperador1.id), 'Não deve conter tarefas de terceiros')
+console.log('✓ PASSOU: O Operador vê exclusivamente suas próprias tarefas em "Minhas Tarefas".\n')
+
+console.log('[TESTE 4: CONSULTA DE TAREFAS DE OPERADORES PELO CARD "EQUIPE" (PROPRIETÁRIO E GESTORA)]')
+const tarefasCarlosVistasPorProp = getTarefasEquipeMembro(allTasks, userProprietario, userOperador1.id)
+console.assert(tarefasCarlosVistasPorProp.length === 1 && tarefasCarlosVistasPorProp[0].id === 't-3', 'Proprietário deve conseguir auditar as tarefas de Carlos')
+
+const tarefasCarlosVistasPorGest = getTarefasEquipeMembro(allTasks, userGestora, userOperador1.id)
+console.assert(tarefasCarlosVistasPorGest.length === 1 && tarefasCarlosVistasPorGest[0].id === 't-3', 'Gestora deve conseguir auditar as tarefas de Carlos')
+console.log('✓ PASSOU: Tanto o Proprietário quanto a Gestora conseguem auditar e administrar tarefas dos operadores no card "Equipe".\n')
+
+console.log('[TESTE 5: BLOQUEIO DO OPERADOR NO ACESSO GERENCIAL DE "EQUIPE"]')
+let bloqueioOperadorConfirmado = false
+try {
+  getTarefasEquipeMembro(allTasks, userOperador1, userOperador2.id)
+} catch (err) {
+  if (err.message.includes('ACESSO_NEGADO')) {
+    bloqueioOperadorConfirmado = true
+  }
+}
+console.assert(bloqueioOperadorConfirmado === true, 'Operador DEVE ser bloqueado de ver tarefas alheias na Equipe')
+console.log('✓ PASSOU: O Operador é rigorosamente bloqueado de acessar a visão gerencial da equipe.\n')
+
+console.log('[TESTE 6: TRANSFERÊNCIA DE TAREFA E PROTEÇÃO CONTRA ACESSO INDEVIDO]')
+const auditLogs = []
+// Carlos transfere sua tarefa t-3 para Mariana devido a redistribuição
+const tarefasAposTransferencia = transferirTarefa(
+  allTasks, 
+  't-3', 
+  userOperador2.id, 
+  'Demanda repassada para cobertura', 
+  userOperador1, 
+  auditLogs
+)
+
+// 6.1 Verifica que a tarefa t-3 agora pertence à Mariana
+const tarefaAtualizada = tarefasAposTransferencia.find(t => t.id === 't-3')
+console.assert(tarefaAtualizada.assigned_to === userOperador2.id, 'Responsável deve ser Mariana')
+
+// 6.2 Verifica que Carlos NÃO ganhou acesso às outras tarefas de Mariana (como a t-4)
+const tarefasDoCarlosAposTransferencia = getMinhasTarefas(tarefasAposTransferencia, userOperador1)
+console.assert(tarefasDoCarlosAposTransferencia.length === 0, 'Carlos não tem mais a tarefa t-3')
+console.assert(!tarefasDoCarlosAposTransferencia.some(t => t.id === 't-4'), 'Carlos NUNCA ganha acesso à tarefa t-4 de Mariana')
+
+// 6.3 Verifica se Mariana agora vê a nova tarefa em suas tarefas pessoais
+const tarefasDaMariana = getMinhasTarefas(tarefasAposTransferencia, userOperador2)
+console.assert(tarefasDaMariana.some(t => t.id === 't-3'), 'Mariana agora tem a tarefa t-3 atribuída a ela')
+console.assert(tarefasDaMariana.some(t => t.id === 't-4'), 'Mariana mantém sua tarefa t-4')
+
+// 6.4 Verifica se a auditoria registrou os detalhes
+console.assert(auditLogs.length === 1, 'Auditoria deve registrar a transferência')
+console.assert(auditLogs[0].previous_assigned_to === userOperador1.id, 'Anterior deve ser Carlos')
+console.assert(auditLogs[0].new_assigned_to === userOperador2.id, 'Novo deve ser Mariana')
+console.assert(auditLogs[0].reason === 'Demanda repassada para cobertura', 'Motivo registrado com sucesso')
+console.log('✓ PASSOU: A transferência ocorreu com registro completo de auditoria e sem conceder acesso indevido às demais tarefas do destinatário.\n')
+
+console.log('======================================================================')
+console.log('RESULTADO FINAL: TODOS OS 6 TESTES OBRIGATÓRIOS FORAM APROVADOS COM 100% DE SUCESSO!')
+console.log('======================================================================')

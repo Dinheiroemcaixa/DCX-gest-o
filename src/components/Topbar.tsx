@@ -13,11 +13,11 @@ interface TopbarProps {
 }
 
 const PAGE_METADATA: Record<ActivePage, { title: string; subtitle: string }> = {
-  tasks: { title: 'Gestão de Tarefas', subtitle: 'Acompanhe e organize as rotinas diárias da equipe' },
-  atrasadas: { title: 'Tarefas Atrasadas', subtitle: 'Atividades que ultrapassaram a data de vencimento' },
-  history: { title: 'Histórico de Conclusões', subtitle: 'Rastreabilidade e métricas de tarefas finalizadas' },
+  tasks: { title: 'Minhas Tarefas', subtitle: 'Seu espaço pessoal de trabalho, prazos e rotinas' },
+  atrasadas: { title: 'Minhas Tarefas Atrasadas', subtitle: 'Suas atividades pessoais que ultrapassaram a data de vencimento' },
+  history: { title: 'Meu Histórico de Conclusões', subtitle: 'Suas atividades finalizadas com auditoria de conclusão' },
   pops: { title: 'Biblioteca de POPs', subtitle: 'Procedimentos Operacionais Padrão e guias de execução' },
-  team: { title: 'Colaboradores & Cobertura', subtitle: 'Visão de equipe e regras de substituição em férias' },
+  team: { title: 'Acompanhamento da Equipe', subtitle: 'Gestão operacional de demandas dos colaboradores' },
   meetings: { title: 'Reuniões & Alinhamentos', subtitle: 'Compromissos agendados e pautas internas' },
   messages: { title: 'Mensagens Diretas', subtitle: 'Comunicação ágil e segura entre operadores' },
   settings: { title: 'Configurações do Proprietário', subtitle: 'Aprovação de cadastros, controle de acessos e segurança' }

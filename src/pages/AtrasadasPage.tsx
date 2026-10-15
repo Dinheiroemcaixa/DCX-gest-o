@@ -21,13 +21,8 @@ export const AtrasadasPage: React.FC<AtrasadasPageProps> = ({
   const pops = getPops()
   const todayStr = new Date().toISOString().split('T')[0]
 
-  // Filtra tarefas atrasadas não concluídas
-  let lateTasks = tasks.filter(t => t.status !== 'Concluida' && t.due_date < todayStr)
-
-  // Operador vê apenas as suas atrasadas
-  if (isOperador && currentUser) {
-    lateTasks = lateTasks.filter(t => t.assigned_to === currentUser.id)
-  }
+  // Regra Pessoal Aprovada: Cada usuário autenticado vê exclusivamente suas próprias tarefas atrasadas
+  let lateTasks = tasks.filter(t => t.status !== 'Concluida' && t.due_date < todayStr && t.assigned_to === currentUser?.id)
 
   // Agrupa por data de vencimento
   const groups: Record<string, Task[]> = {}

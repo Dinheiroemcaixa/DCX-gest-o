@@ -47,23 +47,13 @@ export const TasksPage: React.FC<TasksPageProps> = ({
 
   const [viewMode, setViewMode] = useState<ViewMode>('list')
   const [filterMode, setFilterMode] = useState<FilterMode>('all')
-  const [selectedMemberId, setSelectedMemberId] = useState<string>('all')
   const [expandedSubtasks, setExpandedSubtasks] = useState<Record<string, boolean>>({})
 
   // Cálculo da data atual
   const todayStr = new Date().toISOString().split('T')[0]
 
-  // Regras de Visualização e Filtros de Permissão
-  let filtered = tasks.filter(t => t.status !== 'Concluida')
-
-  // Regra de Permissão dos 3 Perfis:
-  // Operador visualiza apenas as próprias tarefas
-  if (isOperador && currentUser) {
-    filtered = filtered.filter(t => t.assigned_to === currentUser.id || t.created_by === currentUser.id)
-  } else if ((isProprietario || isGestora) && selectedMemberId !== 'all') {
-    // Gestora e Proprietário podem filtrar por membro específico
-    filtered = filtered.filter(t => t.assigned_to === selectedMemberId)
-  }
+  // Regra Principal Aprovada: Cada usuário autenticado vê EXCLUSIVAMENTE suas próprias tarefas
+  let filtered = tasks.filter(t => t.status !== 'Concluida' && t.assigned_to === currentUser?.id)
 
   // Filtro de Status
   if (filterMode === 'open') {
@@ -159,45 +149,6 @@ export const TasksPage: React.FC<TasksPageProps> = ({
           </button>
         </div>
       </div>
-
-      {/* Barra de Filtro de Membros da Equipe (Disponível apenas para Gestora e Proprietário) */}
-      {(isProprietario || isGestora) && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          overflowX: 'auto',
-          padding: '4px 0'
-        }}>
-          <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)' }}>
-            Filtrar Colaborador:
-          </span>
-          <button
-            className={`btn btn-sm ${selectedMemberId === 'all' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setSelectedMemberId('all')}
-          >
-            Toda a Equipe ({tasks.filter(t => t.status !== 'Concluida').length})
-          </button>
-          {profiles.filter(p => p.status === 'aprovado').map(p => {
-            const count = tasks.filter(t => t.status !== 'Concluida' && t.assigned_to === p.id).length
-            return (
-              <button
-                key={p.id}
-                className={`btn btn-sm ${selectedMemberId === p.id ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setSelectedMemberId(p.id)}
-              >
-                <span style={{
-                  width: '8px',
-                  height: '8px',
-                  borderRadius: 'var(--radius-full)',
-                  backgroundColor: p.avatar_color || 'var(--primary)'
-                }} />
-                {p.name.split(' ')[0]} ({count})
-              </button>
-            )
-          })}
-        </div>
-      )}
 
       {/* ── MODO 1: LISTA TABULAR ────────────────────────────── */}
       {viewMode === 'list' && (

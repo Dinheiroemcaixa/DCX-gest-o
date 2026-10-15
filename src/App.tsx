@@ -341,7 +341,17 @@ function MainApp() {
           )}
 
           {activePage === 'team' && (
-            <TeamPage tasks={tasks} />
+            <TeamPage
+              tasks={tasks}
+              onOpenEditTask={(task) => {
+                setEditingTask(task)
+                setTaskModalOpen(true)
+              }}
+              onOpenTransferTask={(task) => setTransferringTask(task)}
+              onOpenPopDrawer={(pop) => setActivePopForDrawer(pop)}
+              onCompleteTask={handleCompleteTask}
+              onDeleteTask={handleDeleteTask}
+            />
           )}
 
           {activePage === 'meetings' && (
