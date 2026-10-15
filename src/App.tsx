@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import type { Task, ActivePage, Pop } from './types'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { getTasks, saveTasks, addAuditLog } from './lib/storage'
+import { getTodayDateStr } from './lib/dateUtils'
 import { Sidebar } from './components/Sidebar'
 import { Topbar } from './components/Topbar'
 import { ToastContainer, type ToastMessage } from './components/Toast'
@@ -59,12 +60,10 @@ function MainApp() {
     saveTasks(newTasks)
   }
 
-  // Contagem de atrasadas para o badge
-  const todayStr = new Date().toISOString().split('T')[0]
+  // Contagem de atrasadas para o badge do usuário autenticado
+  const todayStr = getTodayDateStr()
   const lateCount = tasks.filter(t => {
-    if (t.status === 'Concluida' || t.due_date >= todayStr) return false
-    if (isOperador && currentUser) return t.assigned_to === currentUser.id
-    return true
+    return t.status !== 'Concluida' && t.due_date < todayStr && t.assigned_to === currentUser?.id
   }).length
 
   // Se não estiver logado -> LoginView

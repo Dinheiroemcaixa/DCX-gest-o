@@ -2,6 +2,7 @@ import React from 'react'
 import type { Task, Pop } from '../types'
 import { useAuth } from '../context/AuthContext'
 import { getPops } from '../lib/storage'
+import { getTodayDateStr, formatDateBr } from '../lib/dateUtils'
 import { Clock, AlertTriangle, Check, BookOpen, ArrowRightLeft } from 'lucide-react'
 
 interface AtrasadasPageProps {
@@ -17,9 +18,9 @@ export const AtrasadasPage: React.FC<AtrasadasPageProps> = ({
   onOpenTransferTask,
   onOpenPopDrawer
 }) => {
-  const { currentUser, isOperador } = useAuth()
+  const { currentUser } = useAuth()
   const pops = getPops()
-  const todayStr = new Date().toISOString().split('T')[0]
+  const todayStr = getTodayDateStr()
 
   // Regra Pessoal Aprovada: Cada usuário autenticado vê exclusivamente suas próprias tarefas atrasadas
   let lateTasks = tasks.filter(t => t.status !== 'Concluida' && t.due_date < todayStr && t.assigned_to === currentUser?.id)

@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import type { Task, ViewMode, FilterMode, Priority, Pop } from '../types'
 import { useAuth } from '../context/AuthContext'
 import { getPops } from '../lib/storage'
+import { getTodayDateStr, formatDateBr, isDateWithinInterval } from '../lib/dateUtils'
 import { 
   List, 
   Columns, 
@@ -13,10 +14,13 @@ import {
   ArrowRightLeft, 
   Edit3, 
   Trash2, 
-  Plus, 
   ChevronDown, 
   ChevronUp, 
-  CheckSquare 
+  CheckSquare,
+  CalendarDays,
+  RotateCcw,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react'
 
 interface TasksPageProps {
@@ -31,6 +35,8 @@ interface TasksPageProps {
   searchQuery: string
 }
 
+type DateFilterType = 'today' | 'specific' | 'period'
+
 export const TasksPage: React.FC<TasksPageProps> = ({
   tasks,
   onOpenEditTask,
@@ -42,22 +48,51 @@ export const TasksPage: React.FC<TasksPageProps> = ({
   onDeleteTask,
   searchQuery
 }) => {
-  const { currentUser, profiles, isProprietario, isGestora, isOperador } = useAuth()
+  const { currentUser, isProprietario, isGestora } = useAuth()
   const pops = getPops()
 
+  // 1. Data Operacional Atual (Fuso Horário Local)
+  const todayStr = getTodayDateStr()
+
+  // 2. Estados dos Filtros
   const [viewMode, setViewMode] = useState<ViewMode>('list')
   const [filterMode, setFilterMode] = useState<FilterMode>('all')
+  
+  // Filtro de Data: Padrão é sempre 'today' (Hoje)
+  const [dateFilterType, setDateFilterType] = useState<DateFilterType>('today')
+  const [specificDate, setSpecificDate] = useState<string>(todayStr)
+  const [periodStartDate, setPeriodStartDate] = useState<string>(todayStr)
+  const [periodEndDate, setPeriodEndDate] = useState<string>(todayStr)
+
+  // Estado do mês no Calendário
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => new Date())
+
   const [expandedSubtasks, setExpandedSubtasks] = useState<Record<string, boolean>>({})
 
-  // Cálculo da data atual
-  const todayStr = new Date().toISOString().split('T')[0]
+  // 3. Regra de Isolamento Pessoal: Apenas tarefas atribuídas ao usuário conectado
+  let myTasks = tasks.filter(t => t.assigned_to === currentUser?.id)
 
-  // Regra Principal Aprovada: Cada usuário autenticado vê EXCLUSIVAMENTE suas próprias tarefas
-  let filtered = tasks.filter(t => t.status !== 'Concluida' && t.assigned_to === currentUser?.id)
+  // 4. Regra de Data/Período
+  let filtered = myTasks.filter(t => {
+    // Não lista tarefas concluídas na visualização ativa
+    if (t.status === 'Concluida') return false
 
-  // Filtro de Status
+    if (dateFilterType === 'today') {
+      // Exclusivamente as tarefas com vencimento hoje (não lista futuro indiscriminadamente)
+      return t.due_date === todayStr
+    } else if (dateFilterType === 'specific') {
+      // Dia específico selecionado
+      return t.due_date === specificDate
+    } else if (dateFilterType === 'period') {
+      // Intervalo entre data inicial e data final (inclusivo)
+      return isDateWithinInterval(t.due_date, periodStartDate, periodEndDate)
+    }
+    return true
+  })
+
+  // 5. Filtro de Status Adicional
   if (filterMode === 'open') {
-    filtered = filtered.filter(t => t.status === 'Em Aberto' && t.due_date >= todayStr)
+    filtered = filtered.filter(t => t.status === 'Em Aberto')
   } else if (filterMode === 'in_progress') {
     filtered = filtered.filter(t => t.status === 'Em Andamento')
   } else if (filterMode === 'late') {
@@ -66,13 +101,12 @@ export const TasksPage: React.FC<TasksPageProps> = ({
     filtered = filtered.filter(t => t.priority === 'Alta')
   }
 
-  // Busca textual
+  // 6. Busca Textual
   if (searchQuery.trim()) {
     const q = searchQuery.toLowerCase()
     filtered = filtered.filter(t => 
       t.title.toLowerCase().includes(q) || 
-      (t.description && t.description.toLowerCase().includes(q)) ||
-      (t.assigned_to_name && t.assigned_to_name.toLowerCase().includes(q))
+      (t.description && t.description.toLowerCase().includes(q))
     )
   }
 
@@ -88,9 +122,265 @@ export const TasksPage: React.FC<TasksPageProps> = ({
     setExpandedSubtasks(prev => ({ ...prev, [taskId]: !prev[taskId] }))
   }
 
+  const handleSelectDayInCalendar = (dateStr: string) => {
+    setSpecificDate(dateStr)
+    setDateFilterType('specific')
+  }
+
+  // Calendário Mensal
+  const renderCalendarGrid = () => {
+    const year = calendarMonth.getFullYear()
+    const month = calendarMonth.getMonth()
+    const firstDay = new Date(year, month, 1)
+    const lastDay = new Date(year, month + 1, 0)
+    const startOffset = firstDay.getDay()
+    const daysInMonth = lastDay.getDate()
+
+    const days = []
+    // Dias vazios do início
+    for (let i = 0; i < startOffset; i++) {
+      days.push(<div key={`empty-${i}`} style={{ height: '90px', backgroundColor: 'var(--surface-alt)', opacity: 0.3, borderRadius: 'var(--radius-sm)' }} />)
+    }
+
+    // Dias do mês corrente
+    for (let d = 1; d <= daysInMonth; d++) {
+      const currentDayStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      const isToday = currentDayStr === todayStr
+      const isSelected = (dateFilterType === 'specific' && currentDayStr === specificDate) || (dateFilterType === 'today' && isToday)
+      const isInPeriod = dateFilterType === 'period' && isDateWithinInterval(currentDayStr, periodStartDate, periodEndDate)
+      const dayTasks = myTasks.filter(t => t.due_date === currentDayStr && t.status !== 'Concluida')
+
+      days.push(
+        <div
+          key={currentDayStr}
+          onClick={() => handleSelectDayInCalendar(currentDayStr)}
+          style={{
+            height: '90px',
+            backgroundColor: isSelected ? 'var(--primary-soft)' : isInPeriod ? 'rgba(37, 99, 235, 0.08)' : 'var(--surface)',
+            border: isSelected ? '2px solid var(--primary)' : isInPeriod ? '1px dashed var(--primary)' : isToday ? '2px solid var(--warning)' : '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            padding: '8px',
+            cursor: 'pointer',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            transition: 'var(--transition)'
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{
+              fontWeight: isToday || isSelected ? 800 : 600,
+              fontSize: '13px',
+              color: isToday ? 'var(--primary)' : 'var(--text-main)'
+            }}>
+              {d} {isToday && <span style={{ fontSize: '10px' }}>(Hoje)</span>}
+            </span>
+            {dayTasks.length > 0 && (
+              <span className="badge badge-primary" style={{ padding: '1px 6px', fontSize: '10px' }}>
+                {dayTasks.length}
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', overflow: 'hidden' }}>
+            {dayTasks.slice(0, 2).map(t => (
+              <div
+                key={t.id}
+                style={{
+                  fontSize: '10.5px',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  color: isTaskLate(t) ? 'var(--danger)' : 'var(--text-secondary)'
+                }}
+              >
+                • {t.title}
+              </div>
+            ))}
+            {dayTasks.length > 2 && (
+              <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                +{dayTasks.length - 2} mais
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        {/* Navegação do Mês */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setCalendarMonth(new Date(year, month - 1, 1))}
+            >
+              <ChevronLeft size={16} /> Mês Anterior
+            </button>
+            <h3 style={{ fontSize: '16px', fontWeight: 700, minWidth: '180px', textAlign: 'center' }}>
+              {calendarMonth.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase()}
+            </h3>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setCalendarMonth(new Date(year, month + 1, 1))}
+            >
+              Próximo Mês <ChevronRight size={16} />
+            </button>
+          </div>
+
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => {
+              setCalendarMonth(new Date())
+              handleSelectDayInCalendar(todayStr)
+            }}
+          >
+            Ir para Mês Atual
+          </button>
+        </div>
+
+        {/* Grade de Dias */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(7, 1fr)',
+          gap: '8px',
+          textAlign: 'center',
+          fontWeight: 700,
+          fontSize: '12px',
+          color: 'var(--text-muted)'
+        }}>
+          <div>DOM</div><div>SEG</div><div>TER</div><div>QUA</div><div>QUI</div><div>SEX</div><div>SÁB</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '8px' }}>
+          {days}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      {/* Barra de Filtros e Controles */}
+      {/* ── BARRA DE CONTROLE DE DATA / PERÍODO (NOVA) ────────────────────── */}
+      <div style={{
+        backgroundColor: 'var(--surface)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)',
+        padding: '14px 18px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '12px'
+      }}>
+        {/* Seletor dos Três Modos de Data */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '12.5px', fontWeight: 700, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <CalendarDays size={16} color="var(--primary)" />
+            Filtro de Data:
+          </span>
+
+          {/* Opção 1: Hoje */}
+          <button
+            className={`btn btn-sm ${dateFilterType === 'today' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setDateFilterType('today')}
+            title="Exibe as tarefas programadas para hoje"
+          >
+            Hoje ({formatDateBr(todayStr)})
+          </button>
+
+          {/* Opção 2: Dia Específico */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <button
+              className={`btn btn-sm ${dateFilterType === 'specific' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setDateFilterType('specific')}
+            >
+              Dia Específico:
+            </button>
+            <input
+              type="date"
+              className="form-input"
+              style={{ width: '135px', padding: '4px 8px', fontSize: '12px' }}
+              value={specificDate}
+              onChange={(e) => {
+                setSpecificDate(e.target.value)
+                setDateFilterType('specific')
+              }}
+            />
+          </div>
+
+          {/* Opção 3: Período de Datas */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+            <button
+              className={`btn btn-sm ${dateFilterType === 'period' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setDateFilterType('period')}
+            >
+              Período:
+            </button>
+            <input
+              type="date"
+              className="form-input"
+              style={{ width: '130px', padding: '4px 8px', fontSize: '12px' }}
+              value={periodStartDate}
+              onChange={(e) => {
+                setPeriodStartDate(e.target.value)
+                setDateFilterType('period')
+              }}
+            />
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>até</span>
+            <input
+              type="date"
+              className="form-input"
+              style={{ width: '130px', padding: '4px 8px', fontSize: '12px' }}
+              value={periodEndDate}
+              onChange={(e) => {
+                setPeriodEndDate(e.target.value)
+                setDateFilterType('period')
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Botão de Retorno Rápido para Hoje (se estiver filtrando outra data) */}
+        {dateFilterType !== 'today' && (
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setDateFilterType('today')}
+            style={{ color: 'var(--primary)', fontWeight: 600 }}
+          >
+            <RotateCcw size={14} />
+            Voltar para Hoje
+          </button>
+        )}
+      </div>
+
+      {/* Indicador Textual Amigável da Consulta Atual */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '0 4px',
+        fontSize: '12.5px',
+        color: 'var(--text-secondary)'
+      }}>
+        <div>
+          {dateFilterType === 'today' && (
+            <span>📅 Exibindo <strong>tarefas de hoje ({formatDateBr(todayStr)})</strong></span>
+          )}
+          {dateFilterType === 'specific' && (
+            <span>📅 Exibindo <strong>dia específico: {formatDateBr(specificDate)}</strong></span>
+          )}
+          {dateFilterType === 'period' && (
+            <span>📅 Exibindo período de <strong>{formatDateBr(periodStartDate)}</strong> até <strong>{formatDateBr(periodEndDate)}</strong></span>
+          )}
+        </div>
+        <div>
+          Total listado: <strong>{filtered.length} {filtered.length === 1 ? 'tarefa' : 'tarefas'}</strong>
+        </div>
+      </div>
+
+      {/* ── BARRA DE FILTROS DE STATUS E MODOS DE VISUALIZAÇÃO ──────────────── */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -105,7 +395,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
         {/* Filtros de Status */}
         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
           {[
-            { id: 'all', label: 'Todas Ativas' },
+            { id: 'all', label: 'Todas do Filtro' },
             { id: 'open', label: 'Em Aberto' },
             { id: 'in_progress', label: 'Em Andamento' },
             { id: 'late', label: 'Atrasadas' },
@@ -157,10 +447,12 @@ export const TasksPage: React.FC<TasksPageProps> = ({
             <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)' }}>
               <CheckSquare size={44} style={{ opacity: 0.35, margin: '0 auto 12px' }} />
               <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-secondary)' }}>
-                Nenhuma tarefa pendente neste filtro!
+                Nenhuma tarefa para o período selecionado!
               </div>
               <div style={{ fontSize: '12.5px', marginTop: '4px' }}>
-                Tudo em dia ou nenhuma atividade cadastrada com os critérios selecionados.
+                {dateFilterType === 'today'
+                  ? 'Você não possui tarefas pendentes para hoje. Use os filtros de data para consultar outros dias ou adicione uma nova tarefa.'
+                  : 'Nenhuma atividade encontrada para os critérios informados.'}
               </div>
             </div>
           ) : (
@@ -223,7 +515,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                             {task.title}
                           </span>
 
-                          {/* Badge do POP Vinculado (Abre a gaveta) */}
+                          {/* Badge do POP Vinculado */}
                           {pop && (
                             <button
                               onClick={() => onOpenPopDrawer(pop)}
@@ -250,7 +542,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                           )}
                         </div>
 
-                        {/* Detalhes de Subtarefas e Responsável */}
+                        {/* Detalhes de Subtarefas e Descrição */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                           {totalSubs > 0 && (
                             <button
@@ -282,32 +574,11 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                         </div>
                       </div>
 
-                      {/* Responsável */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '150px', flexShrink: 0 }}>
-                        <div style={{
-                          width: '24px',
-                          height: '24px',
-                          borderRadius: 'var(--radius-full)',
-                          backgroundColor: task.assigned_to_color || 'var(--primary)',
-                          color: '#FFFFFF',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontWeight: 700,
-                          fontSize: '10px'
-                        }}>
-                          {task.assigned_to_name?.substring(0, 2).toUpperCase() || 'U'}
-                        </div>
-                        <span style={{ fontSize: '12.5px', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {task.assigned_to_name?.split(' ')[0]}
-                        </span>
-                      </div>
-
-                      {/* Vencimento */}
+                      {/* Vencimento Operacional */}
                       <div style={{ width: '130px', flexShrink: 0, fontSize: '12.5px' }}>
                         <span style={{ color: isLate ? 'var(--danger)' : 'var(--text-secondary)', fontWeight: isLate ? 700 : 500, display: 'flex', alignItems: 'center', gap: '4px' }}>
                           {isLate && <AlertTriangle size={13} color="var(--danger)" />}
-                          {task.due_date.split('-').reverse().join('/')}
+                          {formatDateBr(task.due_date)}
                         </span>
                       </div>
 
@@ -316,7 +587,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                         {getPriorityBadge(task.priority)}
                       </div>
 
-                      {/* Status (Clicável para ciclo) */}
+                      {/* Status */}
                       <div style={{ width: '110px', flexShrink: 0 }}>
                         <button
                           onClick={() => onCycleStatus(task.id)}
@@ -328,9 +599,8 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                         </button>
                       </div>
 
-                      {/* Ações da Linha */}
+                      {/* Ações */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
-                        {/* Botão de Transferir Tarefa (Permitido para todos os perfis autorizados) */}
                         <button
                           className="btn-ghost btn-sm"
                           onClick={() => onOpenTransferTask(task)}
@@ -349,7 +619,6 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                           <Edit3 size={15} />
                         </button>
 
-                        {/* Apenas Gestora ou Proprietário podem excluir tarefas */}
                         {(isProprietario || isGestora) && (
                           <button
                             className="btn-ghost btn-sm"
@@ -363,7 +632,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                       </div>
                     </div>
 
-                    {/* Subtarefas Expansíveis na Linha */}
+                    {/* Subtarefas Expansíveis */}
                     {isExpanded && task.subtasks && task.subtasks.length > 0 && (
                       <div style={{
                         padding: '10px 20px 14px 58px',
@@ -469,7 +738,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
 
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11.5px', marginTop: '10px' }}>
                         <span style={{ color: 'var(--text-muted)' }}>
-                          📅 {t.due_date.split('-').reverse().join('/')}
+                          📅 {formatDateBr(t.due_date)}
                         </span>
                         {getPriorityBadge(t.priority)}
                       </div>
@@ -480,11 +749,8 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                         borderTop: '1px solid var(--border)',
                         display: 'flex',
                         alignItems: 'center',
-                        justifyContent: 'space-between'
+                        justifyContent: 'flex-end'
                       }}>
-                        <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                          {t.assigned_to_name?.split(' ')[0]}
-                        </span>
                         <button
                           className="btn btn-success btn-sm"
                           style={{ padding: '2px 8px', fontSize: '11px' }}
@@ -505,15 +771,44 @@ export const TasksPage: React.FC<TasksPageProps> = ({
         </div>
       )}
 
-      {/* ── MODO 3: CALENDÁRIO ─────────────────────────────── */}
+      {/* ── MODO 3: CALENDÁRIO MENSUAL ─────────────────────── */}
       {viewMode === 'calendar' && (
-        <div className="card">
-          <div style={{ textAlign: 'center', padding: '30px' }}>
-            <CalIcon size={40} color="var(--primary)" style={{ margin: '0 auto 12px' }} />
-            <h3 style={{ fontSize: '16px', fontWeight: 700 }}>Visão de Calendário Mensal</h3>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-              Grade mensal com contagem de entregas ativas agrupadas por dia civil.
-            </p>
+        <div className="card" style={{ padding: '24px' }}>
+          {renderCalendarGrid()}
+
+          {/* Lista de Tarefas do Dia Selecionado no Calendário */}
+          <div style={{ marginTop: '24px', paddingTop: '18px', borderTop: '1px solid var(--border)' }}>
+            <h4 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '12px' }}>
+              {dateFilterType === 'today' && `Tarefas Agendadas para Hoje (${formatDateBr(todayStr)}) (${filtered.length})`}
+              {dateFilterType === 'specific' && `Tarefas Agendadas para ${formatDateBr(specificDate)} (${filtered.length})`}
+              {dateFilterType === 'period' && `Tarefas Agendadas para o Período (${formatDateBr(periodStartDate)} até ${formatDateBr(periodEndDate)}) (${filtered.length})`}
+            </h4>
+
+            {filtered.length === 0 ? (
+              <div style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>
+                Nenhuma tarefa para este dia.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {filtered.map(t => (
+                  <div
+                    key={t.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '10px 14px',
+                      backgroundColor: 'var(--surface-alt)',
+                      borderRadius: 'var(--radius-md)',
+                      fontSize: '13px'
+                    }}
+                  >
+                    <span>{t.title}</span>
+                    <span className="badge badge-neutral">{t.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
