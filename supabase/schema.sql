@@ -1,9 +1,15 @@
 -- ==============================================================================
 -- DCX GESTÃO — SCHEMA OFICIAL DO BANCO DE DADOS (SUPABASE / POSTGRESQL)
 -- ==============================================================================
--- Arquitetura: RLS Rígido, Multi-tenant Lógico, Funções Security Definer Blindadas,
--- Dupla Proteção de Privilégios (DCL + RLS), Imutabilidade Estrita de Auditoria,
--- Isolamento Pessoal de Tarefas e Ativação Segura do Primeiro Proprietário.
+-- Versão: 2.0.0 (Produção Homologada para Instalação Limpa)
+-- Arquitetura: RLS Rígido, Multi-tenant Lógico, Dupla Camada DCL + RLS,
+-- Triggers de Auditoria Automática Append-Only, Isolamento Estrito de Operador,
+-- Bloqueio Contra Auto-Elevação de Privilégios e Bootstrap Seguro do Proprietário.
+--
+-- AVISO DE IDEMPOTÊNCIA E COMPATIBILIDADE:
+-- Este script foi projetado para execução em projetos Supabase NOVOS e LIMPOS.
+-- Caso seja aplicado sobre estruturas preexistentes, 'CREATE TABLE IF NOT EXISTS'
+-- não altera colunas antigas. Em bancos existentes, execute migrações específicas.
 -- ==============================================================================
 
 -- 0. EXTENSÕES NECESSÁRIAS
@@ -139,10 +145,12 @@ CREATE TABLE IF NOT EXISTS public.subtasks (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())
 );
 
--- 8. TABELA DE AUDITORIA E HISTÓRICO DE TAREFAS (APPEND-ONLY)
+-- 8. TABELA DE AUDITORIA E HISTÓRICO DE TAREFAS (APPEND-ONLY, RETENÇÃO PERMANENTE)
+-- Nota: ON DELETE SET NULL preserva o histórico de auditoria mesmo se a tarefa for excluída
 CREATE TABLE IF NOT EXISTS public.task_audit_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    task_id UUID NOT NULL REFERENCES public.tasks(id) ON DELETE CASCADE,
+    task_id UUID REFERENCES public.tasks(id) ON DELETE SET NULL,
+    task_title TEXT NOT NULL,
     action TEXT NOT NULL, -- 'criacao', 'edicao', 'transferencia', 'conclusao', 'reabertura'
     actor_id UUID NOT NULL REFERENCES public.profiles(id),
     previous_assigned_to UUID REFERENCES public.profiles(id),
@@ -241,6 +249,17 @@ AS $$
     );
 $$;
 
+-- Revoga privilégios públicos genéricos de execução e concede aos autenticados
+REVOKE ALL ON FUNCTION public.get_auth_role() FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.is_approved() FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.is_proprietario() FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.is_gestora_or_above() FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION public.get_auth_role() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_approved() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_proprietario() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_gestora_or_above() TO authenticated;
+
 -- ==============================================================================
 -- GATILHOS DE SEGURANÇA: CRIAÇÃO AUTOMÁTICA E PROTEÇÃO CONTRA AUTO-ELEVAÇÃO
 -- ==============================================================================
@@ -284,7 +303,8 @@ CREATE TRIGGER on_auth_user_created
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
 -- Gatilho 2: Proteção de Campos Sensíveis na Atualização de Perfil
--- Impede que usuários comuns alterem role, status ou approved_by via chamadas diretas.
+-- Impede que usuários comuns alterem role, status ou approved_by.
+-- Suporta o bootstrap transacional do primeiro proprietário sem deadlocks.
 CREATE OR REPLACE FUNCTION public.protect_profile_fields()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -292,6 +312,15 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+    -- Exceção segura e controlada: Bootstrap do primeiro proprietário via SQL Editor
+    IF current_setting('app.bootstrap_first_owner', true) = 'true' THEN
+        -- Permite a promoção apenas se comprovadamente não houver nenhum outro proprietário no sistema
+        IF NOT EXISTS (SELECT 1 FROM public.profiles WHERE role = 'proprietario' AND status = 'aprovado') THEN
+            NEW.updated_at = now();
+            RETURN NEW;
+        END IF;
+    END IF;
+
     -- Se quem está executando NÃO é o Proprietário aprovado
     IF NOT public.is_proprietario() THEN
         -- Barrar alteração de papel
@@ -326,6 +355,263 @@ CREATE TRIGGER trg_protect_profile_fields
     FOR EACH ROW EXECUTE FUNCTION public.protect_profile_fields();
 
 -- ==============================================================================
+-- GATILHO DE PROTEÇÃO DE TAREFAS E CONTROLE DE TRANSFERÊNCIA
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION public.protect_task_operations()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_is_admin BOOLEAN;
+BEGIN
+    v_is_admin := public.is_gestora_or_above();
+
+    -- Se for Gestora ou Proprietário aprovado, possui permissão administrativa plena
+    IF v_is_admin THEN
+        NEW.updated_at = now();
+        RETURN NEW;
+    END IF;
+
+    -- Regras Estritas para Operador:
+    -- 1. O operador só pode modificar tarefas onde ele é o responsável atual
+    IF OLD.assigned_to != auth.uid() THEN
+        RAISE EXCEPTION 'Acesso Negado: Você só pode atualizar tarefas atualmente atribuídas a você.';
+    END IF;
+
+    -- 2. Não pode alterar a autoria original da tarefa nem o identificador
+    IF NEW.id IS DISTINCT FROM OLD.id THEN
+        RAISE EXCEPTION 'Acesso Negado: O identificador da tarefa não pode ser alterado.';
+    END IF;
+
+    IF NEW.created_by IS DISTINCT FROM OLD.created_by THEN
+        RAISE EXCEPTION 'Acesso Negado: A autoria original da tarefa não pode ser alterada.';
+    END IF;
+
+    -- 3. Não pode alterar o POP vinculado (privilégio gerencial)
+    IF NEW.pop_id IS DISTINCT FROM OLD.pop_id OR NEW.pop_version IS DISTINCT FROM OLD.pop_version THEN
+        RAISE EXCEPTION 'Acesso Negado: Somente a Gestora ou o Proprietário podem alterar o POP vinculado.';
+    END IF;
+
+    -- 4. Validação de Transferência de Responsabilidade
+    IF NEW.assigned_to IS DISTINCT FROM OLD.assigned_to THEN
+        -- O novo destinatário DEVE ser um usuário aprovado no sistema
+        IF NOT EXISTS (
+            SELECT 1 FROM public.profiles 
+            WHERE id = NEW.assigned_to AND status = 'aprovado'
+        ) THEN
+            RAISE EXCEPTION 'Acesso Negado: A tarefa só pode ser transferida para um colaborador ativo e aprovado.';
+        END IF;
+
+        -- Na transferência, o operador NÃO pode alterar título, prioridade, vencimento ou descrição simultaneamente
+        IF NEW.title IS DISTINCT FROM OLD.title OR 
+           NEW.priority IS DISTINCT FROM OLD.priority OR 
+           NEW.due_date IS DISTINCT FROM OLD.due_date THEN
+            RAISE EXCEPTION 'Acesso Negado: Na transferência de tarefa, não é permitido alterar escopo, título, vencimento ou prioridade.';
+        END IF;
+    END IF;
+
+    -- 5. Tratamento Confiável de Conclusão / Reabertura
+    IF NEW.status = 'Concluida' AND OLD.status != 'Concluida' THEN
+        NEW.completed_at = now();
+        NEW.completed_by = auth.uid();
+    ELSIF NEW.status != 'Concluida' AND OLD.status = 'Concluida' THEN
+        NEW.reopened_at = now();
+        NEW.reopened_by = auth.uid();
+        NEW.completed_at = NULL;
+        NEW.completed_by = NULL;
+    END IF;
+
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_task_operations ON public.tasks;
+CREATE TRIGGER trg_protect_task_operations
+    BEFORE UPDATE ON public.tasks
+    FOR EACH ROW EXECUTE FUNCTION public.protect_task_operations();
+
+-- ==============================================================================
+-- GATILHO DE AUDITORIA AUTOMÁTICA DE TAREFAS (APPEND-ONLY / ANTI-ADULTERAÇÃO)
+-- ==============================================================================
+-- Este gatilho gera os registros de auditoria diretamente pelo banco de dados,
+-- impedindo que o cliente frontend invente ou falsifique eventos de histórico.
+CREATE OR REPLACE FUNCTION public.log_task_audit_event()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_action TEXT;
+    v_details JSONB;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        v_action := 'criacao';
+        v_details := jsonb_build_object(
+            'title', NEW.title,
+            'assigned_to', NEW.assigned_to,
+            'due_date', NEW.due_date,
+            'priority', NEW.priority
+        );
+
+        INSERT INTO public.task_audit_logs (
+            task_id,
+            task_title,
+            action,
+            actor_id,
+            previous_assigned_to,
+            new_assigned_to,
+            details,
+            created_at
+        ) VALUES (
+            NEW.id,
+            NEW.title,
+            v_action,
+            COALESCE(auth.uid(), NEW.created_by),
+            NULL,
+            NEW.assigned_to,
+            v_details,
+            now()
+        );
+        RETURN NEW;
+    ELSIF TG_OP = 'UPDATE' THEN
+        -- Detecta o evento real ocorrido no registro
+        IF NEW.assigned_to IS DISTINCT FROM OLD.assigned_to THEN
+            v_action := 'transferencia';
+            v_details := jsonb_build_object(
+                'reason', 'Transferência de responsabilidade',
+                'from_user', OLD.assigned_to,
+                'to_user', NEW.assigned_to
+            );
+        ELSIF NEW.status = 'Concluida' AND OLD.status != 'Concluida' THEN
+            v_action := 'conclusao';
+            v_details := jsonb_build_object('completed_at', NEW.completed_at);
+        ELSIF NEW.status != 'Concluida' AND OLD.status = 'Concluida' THEN
+            v_action := 'reabertura';
+            v_details := jsonb_build_object('reopened_at', NEW.reopened_at);
+        ELSE
+            v_action := 'edicao';
+            v_details := jsonb_build_object(
+                'old_status', OLD.status,
+                'new_status', NEW.status,
+                'old_due_date', OLD.due_date,
+                'new_due_date', NEW.due_date
+            );
+        END IF;
+
+        INSERT INTO public.task_audit_logs (
+            task_id,
+            task_title,
+            action,
+            actor_id,
+            previous_assigned_to,
+            new_assigned_to,
+            details,
+            created_at
+        ) VALUES (
+            NEW.id,
+            NEW.title,
+            v_action,
+            COALESCE(auth.uid(), NEW.assigned_to),
+            OLD.assigned_to,
+            NEW.assigned_to,
+            v_details,
+            now()
+        );
+        RETURN NEW;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_task_audit_trail ON public.tasks;
+CREATE TRIGGER trg_task_audit_trail
+    AFTER INSERT OR UPDATE ON public.tasks
+    FOR EACH ROW EXECUTE FUNCTION public.log_task_audit_event();
+
+-- ==============================================================================
+-- GATILHO DE PROTEÇÃO DO CICLO DE VIDA DE POPs
+-- ==============================================================================
+-- Impede que o criador de um POP aprove o próprio procedimento sem aval gerencial.
+CREATE OR REPLACE FUNCTION public.protect_pop_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    -- Se quem está alterando NÃO é Gestora ou Proprietário aprovado
+    IF NOT public.is_gestora_or_above() THEN
+        -- Operador não pode aprovar POP
+        IF NEW.status = 'aprovado' AND OLD.status != 'aprovado' THEN
+            RAISE EXCEPTION 'Acesso Negado: Apenas a Gestora ou o Proprietário podem aprovar Procedimentos Operacionais Padrão.';
+        END IF;
+
+        -- Operador não pode arquivar POP
+        IF NEW.status = 'arquivado' AND OLD.status != 'arquivado' THEN
+            RAISE EXCEPTION 'Acesso Negado: Apenas a Gestora ou o Proprietário podem arquivar um POP.';
+        END IF;
+
+        -- Operador não pode alterar campos de auditoria de aprovação
+        IF NEW.approved_by IS DISTINCT FROM OLD.approved_by OR NEW.approved_at IS DISTINCT FROM OLD.approved_at THEN
+            RAISE EXCEPTION 'Acesso Negado: Os campos de aprovação são de uso exclusivo da Gestão.';
+        END IF;
+    ELSE
+        -- Quando a Gestora ou Proprietário aprovam, registra automaticamente quem aprovou
+        IF NEW.status = 'aprovado' AND OLD.status != 'aprovado' THEN
+            NEW.approved_by = auth.uid();
+            NEW.approved_at = now();
+        END IF;
+    END IF;
+
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_pop_lifecycle ON public.pops;
+CREATE TRIGGER trg_protect_pop_lifecycle
+    BEFORE UPDATE ON public.pops
+    FOR EACH ROW EXECUTE FUNCTION public.protect_pop_lifecycle();
+
+-- ==============================================================================
+-- GATILHO DE PROTEÇÃO DE MENSAGENS INTERNAS
+-- ==============================================================================
+-- Permite que o destinatário marque apenas a leitura (read_at), sem alterar conteúdo.
+CREATE OR REPLACE FUNCTION public.protect_message_updates()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    -- Apenas o destinatário pode atualizar a mensagem recebida
+    IF auth.uid() != OLD.receiver_id THEN
+        RAISE EXCEPTION 'Acesso Negado: Apenas o destinatário da mensagem pode atualizar seu status.';
+    END IF;
+
+    -- O destinatário só pode atualizar o campo read_at
+    IF NEW.sender_id IS DISTINCT FROM OLD.sender_id OR
+       NEW.receiver_id IS DISTINCT FROM OLD.receiver_id OR
+       NEW.content IS DISTINCT FROM OLD.content OR
+       NEW.created_at IS DISTINCT FROM OLD.created_at OR
+       NEW.id IS DISTINCT FROM OLD.id THEN
+        RAISE EXCEPTION 'Acesso Negado: Apenas o registro de leitura (read_at) pode ser atualizado em mensagens.';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_message_updates ON public.messages;
+CREATE TRIGGER trg_protect_message_updates
+    BEFORE UPDATE ON public.messages
+    FOR EACH ROW EXECUTE FUNCTION public.protect_message_updates();
+
+-- ==============================================================================
 -- PROCEDIMENTO SEGURO PARA ATIVAÇÃO DO PRIMEIRO PROPRIETÁRIO
 -- ==============================================================================
 -- Executável unicamente no SQL Editor do Supabase (role postgres/service_role).
@@ -340,6 +626,9 @@ DECLARE
     v_user_id UUID;
     v_proprietario_exists BOOLEAN;
 BEGIN
+    -- 0. Lock transacional contra chamadas concorrentes
+    PERFORM pg_advisory_xact_lock(hashtext('promover_primeiro_proprietario_lock'));
+
     -- 1. Verifica se já existe qualquer Proprietário aprovado no sistema
     SELECT EXISTS (
         SELECT 1 FROM public.profiles WHERE role = 'proprietario' AND status = 'aprovado'
@@ -356,7 +645,10 @@ BEGIN
         RAISE EXCEPTION 'Usuário "%" não encontrado na base. Cadastre-se primeiro no aplicativo ou pelo painel do Supabase Auth.', p_email;
     END IF;
 
-    -- 3. Promove o usuário e aprova a conta
+    -- 3. Habilita a flag temporária de sessão para a transação atual (bypass seguro da trigger)
+    PERFORM set_config('app.bootstrap_first_owner', 'true', true);
+
+    -- 4. Promove o usuário e aprova a conta
     UPDATE public.profiles
     SET 
         role = 'proprietario',
@@ -391,27 +683,7 @@ ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 -- DUPLA CAMADA DE SEGURANÇA: PRIVILÉGIOS DCL EXPLÍCITOS
 -- ==============================================================================
 
--- Tabela Profiles: Inserção PROIBIDA para API pública (feita exclusivamente via trigger handle_new_user)
-REVOKE INSERT ON public.profiles FROM PUBLIC, anon, authenticated;
-GRANT SELECT, UPDATE ON public.profiles TO authenticated;
-
--- Tabela Auditoria: Estritamente Append-Only (UPDATE e DELETE PROIBIDOS para qualquer role de API)
-REVOKE UPDATE, DELETE ON public.task_audit_logs FROM PUBLIC, anon, authenticated;
-GRANT SELECT, INSERT ON public.task_audit_logs TO authenticated;
-
--- Tabela Versões de POPs: Imutabilidade de Conteúdo Aprovado (UPDATE PROIBIDO)
-REVOKE UPDATE ON public.pop_versions FROM PUBLIC, anon, authenticated;
-GRANT SELECT, INSERT, DELETE ON public.pop_versions TO authenticated;
-
--- Tabelas Operacionais Gerais
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.tasks TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.subtasks TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.pop_categories TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.pops TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.meetings TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.messages TO authenticated;
-
--- Role Anon (Não autenticados): Acesso totalmente bloqueado aos dados operacionais
+-- 1. Role Anon (Não autenticados): Bloqueio total em todas as tabelas
 REVOKE ALL ON public.profiles FROM anon;
 REVOKE ALL ON public.tasks FROM anon;
 REVOKE ALL ON public.subtasks FROM anon;
@@ -421,6 +693,27 @@ REVOKE ALL ON public.pops FROM anon;
 REVOKE ALL ON public.pop_versions FROM anon;
 REVOKE ALL ON public.meetings FROM anon;
 REVOKE ALL ON public.messages FROM anon;
+
+-- 2. Tabela Profiles: Inserção PROIBIDA para API pública (exclusiva via trigger auth.users)
+REVOKE INSERT ON public.profiles FROM PUBLIC, anon, authenticated;
+GRANT SELECT, UPDATE ON public.profiles TO authenticated;
+
+-- 3. Tabela Auditoria: Estritamente Append-Only gerada por Triggers
+-- A API pública NÃO pode inserir, editar ou apagar histórico de auditoria
+REVOKE INSERT, UPDATE, DELETE ON public.task_audit_logs FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.task_audit_logs TO authenticated;
+
+-- 4. Tabela Versões de POPs: Imutabilidade de Conteúdo Aprovado (UPDATE e DELETE PROIBIDOS)
+REVOKE UPDATE, DELETE ON public.pop_versions FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON public.pop_versions TO authenticated;
+
+-- 5. Tabelas Operacionais Gerais para Usuários Autenticados
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.tasks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.subtasks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.pop_categories TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.pops TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.meetings TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.messages TO authenticated;
 
 -- ==============================================================================
 -- POLÍTICAS RLS (ROW LEVEL SECURITY)
@@ -457,17 +750,13 @@ CREATE POLICY "profiles_delete_policy" ON public.profiles FOR DELETE TO authenti
     USING (public.is_proprietario());
 
 -- ── 2. POLÍTICAS: TASKS (ISOLAMENTO ESTRITO OPERADOR VS. EQUIPE) ──────────────
--- Regra de Ouro:
--- • Operador aprovado consulta e atualiza EXCLUSIVAMENTE tarefas atribuídas a ele (assigned_to = auth.uid()).
--- • Operador NÃO consulta tarefas de outros colegas apenas porque as criou no passado (created_by não concede leitura).
--- • Proprietário e Gestora aprovados possuem acesso gerencial a todas as tarefas da equipe.
 DROP POLICY IF EXISTS "tasks_select_policy" ON public.tasks;
 CREATE POLICY "tasks_select_policy" ON public.tasks FOR SELECT TO authenticated
     USING (
         public.is_approved() AND (
             -- Gestora e Proprietário auditam e acompanham toda a equipe
             public.is_gestora_or_above()
-            -- Operador vê estritamente o que está sob sua responsabilidade
+            -- Operador vê estritamente o que está atribuído a ele
             OR assigned_to = auth.uid()
         )
     );
@@ -526,16 +815,10 @@ CREATE POLICY "subtasks_all_policy" ON public.subtasks FOR ALL TO authenticated
     );
 
 -- ── 4. POLÍTICAS: AUDITORIA DE TAREFAS (APPEND-ONLY) ────────────────────────
--- Imutabilidade Absoluta: Sem políticas de UPDATE ou DELETE
+-- Leitura permitida para usuários aprovados; sem políticas de UPDATE ou DELETE
 DROP POLICY IF EXISTS "audit_select_policy" ON public.task_audit_logs;
 CREATE POLICY "audit_select_policy" ON public.task_audit_logs FOR SELECT TO authenticated
     USING (public.is_approved());
-
-DROP POLICY IF EXISTS "audit_insert_policy" ON public.task_audit_logs;
-CREATE POLICY "audit_insert_policy" ON public.task_audit_logs FOR INSERT TO authenticated
-    WITH CHECK (
-        public.is_approved() AND actor_id = auth.uid()
-    );
 
 -- ── 5. POLÍTICAS: POPs E CATEGORIAS ─────────────────────────────────────────
 DROP POLICY IF EXISTS "categories_select_policy" ON public.pop_categories;
@@ -575,11 +858,6 @@ CREATE POLICY "pop_versions_select_policy" ON public.pop_versions FOR SELECT TO 
 DROP POLICY IF EXISTS "pop_versions_insert_policy" ON public.pop_versions;
 CREATE POLICY "pop_versions_insert_policy" ON public.pop_versions FOR INSERT TO authenticated
     WITH CHECK (public.is_approved() AND created_by = auth.uid());
-
--- Versões aprovadas de POPs são imutáveis (Sem política de UPDATE)
-DROP POLICY IF EXISTS "pop_versions_delete_policy" ON public.pop_versions;
-CREATE POLICY "pop_versions_delete_policy" ON public.pop_versions FOR DELETE TO authenticated
-    USING (public.is_approved() AND public.is_proprietario());
 
 -- ── 7. POLÍTICAS: REUNIÕES ──────────────────────────────────────────────────
 DROP POLICY IF EXISTS "meetings_select_policy" ON public.meetings;
