@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS public.pops (
     category_id UUID REFERENCES public.pop_categories(id) ON DELETE SET NULL,
     estimated_minutes INTEGER DEFAULT 30,
     status pop_status NOT NULL DEFAULT 'rascunho',
-    current_version INTEGER NOT NULL DEFAULT 1,
+    current_version INTEGER NOT NULL DEFAULT 1 CHECK (current_version >= 1),
     created_by UUID NOT NULL REFERENCES public.profiles(id),
     approved_by UUID REFERENCES public.profiles(id),
     approved_at TIMESTAMPTZ,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS public.pops (
 CREATE TABLE IF NOT EXISTS public.pop_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     pop_id UUID NOT NULL REFERENCES public.pops(id) ON DELETE RESTRICT,
-    version_number INTEGER NOT NULL,
+    version_number INTEGER NOT NULL CHECK (version_number >= 1),
     title TEXT NOT NULL,
     objective TEXT,
     prerequisites TEXT,
@@ -293,8 +293,35 @@ CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
+-- Gatilho de Sincronização: auth.users (email) -> public.profiles (email)
+CREATE OR REPLACE FUNCTION public.handle_user_email_update()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF NEW.email IS DISTINCT FROM OLD.email THEN
+        UPDATE public.profiles
+        SET email = LOWER(TRIM(NEW.email)), updated_at = now()
+        WHERE id = NEW.id;
+
+        IF NOT FOUND THEN
+            RAISE WARNING 'Sincronização de e-mail: Perfil não encontrado para o usuário %.', NEW.id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_updated ON auth.users;
+CREATE TRIGGER on_auth_user_updated
+    AFTER UPDATE OF email ON auth.users
+    FOR EACH ROW EXECUTE FUNCTION public.handle_user_email_update();
+
 -- Gatilho 2: Proteção de Campos Sensíveis na Atualização de Perfil
 -- Impede que usuários comuns alterem role, status ou approved_by.
+-- Garante que profiles.id seja imutável para todos e impede inconsistência de email com auth.users.
 CREATE OR REPLACE FUNCTION public.protect_profile_fields()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -308,6 +335,22 @@ BEGIN
         IF NOT EXISTS (SELECT 1 FROM public.profiles WHERE role = 'proprietario' AND status = 'aprovado') THEN
             NEW.updated_at = now();
             RETURN NEW;
+        END IF;
+    END IF;
+
+    -- 1. Proteção Absoluta: O identificador do perfil (id) é imutável para todos os usuários (inclusive Proprietário)
+    IF NEW.id IS DISTINCT FROM OLD.id THEN
+        RAISE EXCEPTION 'Acesso Negado: O identificador do perfil (id) é estritamente imutável e não pode ser alterado.';
+    END IF;
+
+    -- 2. Proteção e Sincronização de Identidade:
+    -- profiles.email só pode ser alterado se corresponder exatamente ao e-mail já confirmado e registrado em auth.users
+    IF NEW.email IS DISTINCT FROM OLD.email THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM auth.users 
+            WHERE id = NEW.id AND LOWER(TRIM(email)) = LOWER(TRIM(NEW.email))
+        ) THEN
+            RAISE EXCEPTION 'Inconsistência de Identidade: O e-mail do perfil só pode ser alterado através do fluxo oficial de autenticação (auth.users).';
         END IF;
     END IF;
 
@@ -327,11 +370,6 @@ BEGIN
         IF NEW.approved_by IS DISTINCT FROM OLD.approved_by OR NEW.approved_at IS DISTINCT FROM OLD.approved_at THEN
             RAISE EXCEPTION 'Acesso Negado: Campos de auditoria de aprovação são de uso exclusivo do Proprietário.';
         END IF;
-
-        -- Barrar alteração do ID e E-mail
-        IF NEW.id IS DISTINCT FROM OLD.id OR NEW.email IS DISTINCT FROM OLD.email THEN
-            RAISE EXCEPTION 'Acesso Negado: Não é permitido alterar o identificador ou o e-mail cadastrado.';
-        END IF;
     END IF;
 
     NEW.updated_at = now();
@@ -344,9 +382,72 @@ CREATE TRIGGER trg_protect_profile_fields
     BEFORE UPDATE ON public.profiles
     FOR EACH ROW EXECUTE FUNCTION public.protect_profile_fields();
 
+-- Gatilho de Proteção contra Deleção Física de Perfis com Histórico Operacional
+CREATE OR REPLACE FUNCTION public.protect_profile_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM public.tasks WHERE assigned_to = OLD.id OR created_by = OLD.id) OR
+       EXISTS (SELECT 1 FROM public.task_audit_logs WHERE actor_id = OLD.id OR previous_assigned_to = OLD.id OR new_assigned_to = OLD.id) OR
+       EXISTS (SELECT 1 FROM public.pop_versions WHERE created_by = OLD.id) OR
+       EXISTS (SELECT 1 FROM public.pops WHERE created_by = OLD.id) THEN
+        RAISE EXCEPTION 'Acesso Negado: Não é permitido excluir fisicamente um perfil que possui histórico operacional, de auditoria ou POPs. Altere o status da conta para suspenso.';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_profile_delete ON public.profiles;
+CREATE TRIGGER trg_protect_profile_delete
+    BEFORE DELETE ON public.profiles
+    FOR EACH ROW EXECUTE FUNCTION public.protect_profile_delete();
+
 -- ==============================================================================
 -- GATILHO DE PROTEÇÃO DE TAREFAS: TRANSFERÊNCIA ESTREITA E PRESERVAÇÃO DE CAMPOS
 -- ==============================================================================
+-- Gatilho de Validação na Criação de Tarefas: Elegibilidade do Responsável e Preservação de Metadados
+CREATE OR REPLACE FUNCTION public.protect_task_creation()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    -- 1. Validar que o responsável designado (assigned_to) é um colaborador ativo e aprovado
+    IF NOT EXISTS (
+        SELECT 1 FROM public.profiles 
+        WHERE id = NEW.assigned_to AND status = 'aprovado'
+    ) THEN
+        RAISE EXCEPTION 'Acesso Negado: A tarefa só pode ser atribuída a um colaborador ativo e aprovado.';
+    END IF;
+
+    -- 2. Preservar marca temporal de criação consistente
+    IF NEW.created_at IS NULL THEN
+        NEW.created_at := timezone('utc', now());
+    END IF;
+    NEW.updated_at := NEW.created_at;
+
+    -- 3. Se for operador comum (não gestor), created_by e assigned_to devem ser ele próprio
+    IF NOT public.is_gestora_or_above() THEN
+        IF auth.uid() IS NOT NULL THEN
+            IF NEW.created_by != auth.uid() OR NEW.assigned_to != auth.uid() THEN
+                RAISE EXCEPTION 'Acesso Negado: Colaboradores comuns só podem criar tarefas pessoais atribuídas a si mesmos.';
+            END IF;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_task_creation ON public.tasks;
+CREATE TRIGGER trg_protect_task_creation
+    BEFORE INSERT ON public.tasks
+    FOR EACH ROW EXECUTE FUNCTION public.protect_task_creation();
+
 CREATE OR REPLACE FUNCTION public.protect_task_operations()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -356,21 +457,37 @@ AS $$
 DECLARE
     v_is_admin BOOLEAN;
 BEGIN
+    -- 1. Regra Universal: A data de criação original (created_at) é estritamente imutável para todos
+    IF NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION 'Acesso Negado: A data de criação original da tarefa (created_at) é estritamente imutável.';
+    END IF;
+    NEW.created_at := OLD.created_at;
+
+    -- 2. Regra Universal: O destinatário (assigned_to), em qualquer transferência, DEVE ser ativo e aprovado
+    IF NEW.assigned_to IS DISTINCT FROM OLD.assigned_to THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.profiles 
+            WHERE id = NEW.assigned_to AND status = 'aprovado'
+        ) THEN
+            RAISE EXCEPTION 'Acesso Negado: A tarefa só pode ser transferida para um colaborador ativo e aprovado.';
+        END IF;
+    END IF;
+
     v_is_admin := public.is_gestora_or_above();
 
-    -- Se for Gestora ou Proprietário aprovado, possui permissão administrativa plena
+    -- Se for Gestora ou Proprietário aprovado, possui permissão administrativa para os demais campos
     IF v_is_admin THEN
         NEW.updated_at = now();
         RETURN NEW;
     END IF;
 
     -- ── Regras Estritas para o Operador ──────────────────────────────────────
-    -- 1. O operador só pode modificar tarefas onde ele é o responsável atual
+    -- 3. O operador só pode modificar tarefas onde ele é o responsável atual
     IF OLD.assigned_to != auth.uid() THEN
         RAISE EXCEPTION 'Acesso Negado: Você só pode atualizar tarefas atualmente atribuídas a você.';
     END IF;
 
-    -- 2. Não pode alterar a autoria original da tarefa nem o identificador
+    -- 4. Não pode alterar a autoria original da tarefa nem o identificador
     IF NEW.id IS DISTINCT FROM OLD.id THEN
         RAISE EXCEPTION 'Acesso Negado: O identificador da tarefa não pode ser alterado.';
     END IF;
@@ -379,24 +496,16 @@ BEGIN
         RAISE EXCEPTION 'Acesso Negado: A autoria original da tarefa não pode ser alterada.';
     END IF;
 
-    -- 3. Não pode alterar o POP vinculado (privilégio gerencial)
+    -- 5. Não pode alterar o POP vinculado (privilégio gerencial)
     IF NEW.pop_id IS DISTINCT FROM OLD.pop_id OR NEW.pop_version IS DISTINCT FROM OLD.pop_version THEN
         RAISE EXCEPTION 'Acesso Negado: Somente a Gestora ou o Proprietário podem alterar o POP vinculado.';
     END IF;
 
-    -- 4. CASO 1: TRANSFERÊNCIA DE RESPONSABILIDADE (Comparação Exaustiva de Campos)
+    -- 6. CASO 1: TRANSFERÊNCIA DE RESPONSABILIDADE (Comparação Exaustiva de Campos)
     -- Quando o operador transfere uma tarefa, permite SOMENTE alterar o assigned_to e o updated_at.
     -- É estritamente proibido alterar título, descrição, datas, horários, prioridade, status, recorrência, etc.
     IF NEW.assigned_to IS DISTINCT FROM OLD.assigned_to THEN
-        -- O novo destinatário DEVE ser um usuário aprovado no sistema
-        IF NOT EXISTS (
-            SELECT 1 FROM public.profiles 
-            WHERE id = NEW.assigned_to AND status = 'aprovado'
-        ) THEN
-            RAISE EXCEPTION 'Acesso Negado: A tarefa só pode ser transferida para um colaborador ativo e aprovado.';
-        END IF;
-
-        -- Comparação exaustiva de TODOS os campos de negócio:
+        -- Comparação exaustiva de TODOS os campos da tarefa:
         IF NEW.title IS DISTINCT FROM OLD.title OR
            NEW.description IS DISTINCT FROM OLD.description OR
            NEW.due_date IS DISTINCT FROM OLD.due_date OR
@@ -413,11 +522,14 @@ BEGIN
            NEW.completed_at IS DISTINCT FROM OLD.completed_at OR
            NEW.completed_by IS DISTINCT FROM OLD.completed_by OR
            NEW.reopened_at IS DISTINCT FROM OLD.reopened_at OR
-           NEW.reopened_by IS DISTINCT FROM OLD.reopened_by THEN
+           NEW.reopened_by IS DISTINCT FROM OLD.reopened_by OR
+           NEW.created_at IS DISTINCT FROM OLD.created_at OR
+           NEW.pop_id IS DISTINCT FROM OLD.pop_id OR
+           NEW.pop_version IS DISTINCT FROM OLD.pop_version THEN
             RAISE EXCEPTION 'Acesso Negado: Ao transferir uma tarefa, é estritamente proibido alterar simultaneamente título, descrição, datas, horários, prioridade, status ou qualquer outro campo da atividade.';
         END IF;
 
-    -- 5. CASO 2: EDIÇÃO NORMAL (SEM TRANSFERÊNCIA)
+    -- 7. CASO 2: EDIÇÃO NORMAL (SEM TRANSFERÊNCIA)
     -- Operador atualiza status, conclusão/reabertura ou detalhes sob sua responsabilidade
     ELSE
         -- Tratamento Confiável de Conclusão / Reabertura
@@ -461,9 +573,15 @@ BEGIN
     v_actor_id := auth.uid();
     
     IF v_actor_id IS NULL THEN
-        -- Na criação, se auth.uid() for nulo, aceita apenas se NEW.created_by for explicitado
-        IF TG_OP = 'INSERT' AND NEW.created_by IS NOT NULL THEN
-            v_actor_id := NEW.created_by;
+        -- Não confiar isoladamente em NEW.created_by.
+        -- Permite apenas em INSERT sob contexto de sistema explicitado e se o perfil for comprovadamente aprovado
+        IF TG_OP = 'INSERT' AND NEW.created_by IS NOT NULL 
+           AND (current_setting('app.system_audit_context', true) = 'true' OR current_setting('app.bootstrap_first_owner', true) = 'true') THEN
+            IF EXISTS (SELECT 1 FROM public.profiles WHERE id = NEW.created_by AND status = 'aprovado') THEN
+                v_actor_id := NEW.created_by;
+            ELSE
+                RAISE EXCEPTION 'Segurança de Auditoria: Operação abortada. Não é permitido registrar ou alterar tarefas sem identificação inequívoca do autor (auth.uid nulo).';
+            END IF;
         ELSE
             RAISE EXCEPTION 'Segurança de Auditoria: Operação abortada. Não é permitido registrar ou alterar tarefas sem identificação inequívoca do autor (auth.uid nulo).';
         END IF;
@@ -557,7 +675,7 @@ CREATE TRIGGER trg_task_audit_trail
 -- GATILHOS DE PROTEÇÃO DO CICLO DE VIDA E HISTÓRICO DE POPs
 -- ==============================================================================
 
--- 1. Impede aprovação ou arquivamento não autorizado de POPs
+-- 1. Impede aprovação ou arquivamento não autorizado de POPs e valida coerência de versões
 CREATE OR REPLACE FUNCTION public.protect_pop_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -565,6 +683,19 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+    -- Validar coerência de current_version com as versões registradas no histórico
+    IF NEW.current_version IS DISTINCT FROM OLD.current_version THEN
+        IF EXISTS (SELECT 1 FROM public.pop_versions WHERE pop_id = NEW.id) THEN
+            IF NOT EXISTS (SELECT 1 FROM public.pop_versions WHERE pop_id = NEW.id AND version_number = NEW.current_version) THEN
+                RAISE EXCEPTION 'Inconsistência de Versão: A versão % indicada não existe no histórico de versões do POP.', NEW.current_version;
+            END IF;
+        ELSE
+            IF NEW.current_version != 1 THEN
+                RAISE EXCEPTION 'Inconsistência de Versão: POP sem versões históricas deve manter versão inicial 1.';
+            END IF;
+        END IF;
+    END IF;
+
     -- Se quem está alterando NÃO é Gestora ou Proprietário aprovado
     IF NOT public.is_gestora_or_above() THEN
         -- Operador não pode aprovar POP
@@ -618,6 +749,65 @@ DROP TRIGGER IF EXISTS trg_protect_pop_delete ON public.pops;
 CREATE TRIGGER trg_protect_pop_delete
     BEFORE DELETE ON public.pops
     FOR EACH ROW EXECUTE FUNCTION public.protect_pop_delete();
+
+-- 3. Validação de Sequência Contínua de Versões de POPs com Bloqueio Concorrente no Pai
+CREATE OR REPLACE FUNCTION public.validate_pop_version_sequence()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_next_version INTEGER;
+BEGIN
+    -- Serialização concorrente estrita: bloqueia a linha do POP pai para evitar condições de corrida
+    PERFORM 1 FROM public.pops WHERE id = NEW.pop_id FOR UPDATE;
+
+    -- Obter a próxima versão estrita para o POP
+    SELECT COALESCE(MAX(version_number), 0) + 1
+    INTO v_next_version
+    FROM public.pop_versions
+    WHERE pop_id = NEW.pop_id;
+
+    -- Se version_number for nulo, assume a próxima sequência; se fornecido, valida que não há saltos
+    IF NEW.version_number IS NULL THEN
+        NEW.version_number := v_next_version;
+    ELSIF NEW.version_number != v_next_version THEN
+        RAISE EXCEPTION 'Integridade de Versão: O número da versão do POP deve ser estritamente sequencial. A próxima versão esperada para este POP é %.', v_next_version;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validate_pop_version_sequence ON public.pop_versions;
+DROP TRIGGER IF EXISTS trg_validate_and_sync_pop_version ON public.pop_versions;
+CREATE TRIGGER trg_validate_pop_version_sequence
+    BEFORE INSERT ON public.pop_versions
+    FOR EACH ROW EXECUTE FUNCTION public.validate_pop_version_sequence();
+
+-- 4. Sincronização Segura de current_version no Ciclo de Vida do POP (Pós-Gravação)
+CREATE OR REPLACE FUNCTION public.sync_pop_current_version()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    -- A nova versão já foi fisicamente gravada na tabela pop_versions e é visível para o validador de ciclo de vida
+    UPDATE public.pops
+    SET current_version = NEW.version_number,
+        updated_at = now()
+    WHERE id = NEW.pop_id;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_sync_pop_current_version ON public.pop_versions;
+CREATE TRIGGER trg_sync_pop_current_version
+    AFTER INSERT ON public.pop_versions
+    FOR EACH ROW EXECUTE FUNCTION public.sync_pop_current_version();
 
 -- ==============================================================================
 -- GATILHO DE PROTEÇÃO DE MENSAGENS INTERNAS
@@ -735,8 +925,9 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon;
 
 -- 3. Tabela Profiles: Inserção e Deleção PROIBIDAS para API de usuários
 -- Inserção é feita unicamente pela trigger handle_new_user (SECURITY DEFINER)
+-- Deleção física é revogada na API; encerramento de contas deve ser feito via suspensão (status = 'suspenso')
 REVOKE ALL ON public.profiles FROM PUBLIC, anon, authenticated;
-GRANT SELECT, UPDATE, DELETE ON public.profiles TO authenticated;
+GRANT SELECT, UPDATE ON public.profiles TO authenticated;
 
 -- 4. Tabela Auditoria: Estritamente Append-Only gerada por Triggers internas
 -- Nenhuma role de API (nem authenticated) pode fazer INSERT, UPDATE ou DELETE
@@ -761,6 +952,11 @@ GRANT EXECUTE ON FUNCTION public.get_auth_role() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_approved() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_proprietario() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_gestora_or_above() TO authenticated;
+
+-- 8. Blindagem de Permissões Padrão para Funções e Tabelas Futuras no Schema Public
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON ROUTINES FROM PUBLIC, anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC, anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC, anon;
 
 -- ==============================================================================
 -- POLÍTICAS RLS (ROW LEVEL SECURITY)
@@ -804,7 +1000,9 @@ DROP POLICY IF EXISTS "tasks_insert_policy" ON public.tasks;
 CREATE POLICY "tasks_insert_policy" ON public.tasks FOR INSERT TO authenticated
     WITH CHECK (
         public.is_approved() AND (
-            public.is_gestora_or_above()
+            (public.is_gestora_or_above() AND EXISTS (
+                SELECT 1 FROM public.profiles WHERE id = assigned_to AND status = 'aprovado'
+            ))
             OR (assigned_to = auth.uid() AND created_by = auth.uid())
         )
     );
@@ -819,9 +1017,7 @@ CREATE POLICY "tasks_update_policy" ON public.tasks FOR UPDATE TO authenticated
     )
     WITH CHECK (
         public.is_approved() AND (
-            public.is_gestora_or_above() 
-            OR (assigned_to = auth.uid())
-            OR EXISTS (SELECT 1 FROM public.profiles WHERE id = assigned_to AND status = 'aprovado')
+            EXISTS (SELECT 1 FROM public.profiles WHERE id = assigned_to AND status = 'aprovado')
         )
     );
 
@@ -848,10 +1044,18 @@ CREATE POLICY "subtasks_all_policy" ON public.subtasks FOR ALL TO authenticated
     );
 
 -- ── 4. POLÍTICAS: AUDITORIA DE TAREFAS (APPEND-ONLY) ────────────────────────
--- Leitura permitida para usuários aprovados; sem políticas de UPDATE ou DELETE
+-- Leitura restrita: Gestores auditam toda a equipe; Operadores consultam exclusivamente tarefas sob sua responsabilidade/autoria
 DROP POLICY IF EXISTS "audit_select_policy" ON public.task_audit_logs;
 CREATE POLICY "audit_select_policy" ON public.task_audit_logs FOR SELECT TO authenticated
-    USING (public.is_approved());
+    USING (
+        public.is_approved() AND (
+            public.is_gestora_or_above()
+            OR actor_id = auth.uid()
+            OR previous_assigned_to = auth.uid()
+            OR new_assigned_to = auth.uid()
+            OR task_id IN (SELECT id FROM public.tasks WHERE assigned_to = auth.uid())
+        )
+    );
 
 -- ── 5. POLÍTICAS: POPs E CATEGORIAS ─────────────────────────────────────────
 DROP POLICY IF EXISTS "categories_select_policy" ON public.pop_categories;
