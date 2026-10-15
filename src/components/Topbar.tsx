@@ -20,7 +20,7 @@ const PAGE_METADATA: Record<ActivePage, { title: string; subtitle: string }> = {
   team: { title: 'Acompanhamento da Equipe', subtitle: 'Gestão operacional de demandas dos colaboradores' },
   meetings: { title: 'Reuniões & Alinhamentos', subtitle: 'Compromissos agendados e pautas internas' },
   messages: { title: 'Mensagens Diretas', subtitle: 'Comunicação ágil e segura entre operadores' },
-  settings: { title: 'Configurações do Proprietário', subtitle: 'Aprovação de cadastros, controle de acessos e segurança' }
+  settings: { title: 'Configurações do Desenvolvedor', subtitle: 'Aprovação de cadastros, controle de acessos e segurança' }
 }
 
 export const Topbar: React.FC<TopbarProps> = ({

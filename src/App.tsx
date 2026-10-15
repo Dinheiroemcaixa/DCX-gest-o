@@ -20,7 +20,7 @@ import { SettingsPage } from './pages/SettingsPage'
 import './styles/theme.css'
 
 function MainApp() {
-  const { currentUser, isApproved, isProprietario, isOperador } = useAuth()
+  const { currentUser, isApproved, isProprietario, isOperador, isLoadingSession } = useAuth()
 
   const [activePage, setActivePage] = useState<ActivePage>('tasks')
   const [tasks, setTasks] = useState<Task[]>(() => getTasks())
@@ -65,6 +65,55 @@ function MainApp() {
   const lateCount = tasks.filter(t => {
     return t.status !== 'Concluida' && t.due_date < todayStr && t.assigned_to === currentUser?.id
   }).length
+
+  // Estado de Carregamento / Restauração de Sessão
+  if (isLoadingSession) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'var(--bg-app)',
+        gap: '14px'
+      }}>
+        <div style={{
+          width: '50px',
+          height: '50px',
+          borderRadius: '14px',
+          background: 'linear-gradient(135deg, #1D4ED8 0%, #2563EB 50%, #3B82F6 100%)',
+          color: '#FFFFFF',
+          fontWeight: 800,
+          fontSize: '18px',
+          letterSpacing: '1px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          boxShadow: '0 8px 16px -4px rgba(37, 99, 235, 0.35)'
+        }}>
+          DCX
+        </div>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          color: 'var(--text-muted)',
+          fontSize: '13px'
+        }}>
+          <div style={{
+            width: '14px',
+            height: '14px',
+            border: '2px solid var(--border)',
+            borderTopColor: 'var(--primary)',
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite'
+          }} />
+          <span>Verificando sessão segura...</span>
+        </div>
+      </div>
+    )
+  }
 
   // Se não estiver logado -> LoginView
   if (!currentUser) {

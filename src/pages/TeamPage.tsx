@@ -144,7 +144,7 @@ export const TeamPage: React.FC<TeamPageProps> = ({
         </div>
 
         <span className="badge badge-primary" style={{ padding: '6px 12px', fontSize: '12px' }}>
-          {isProprietario ? 'Visão Integral do Proprietário' : 'Visão Operacional da Gestora'}
+          {isProprietario ? 'Visão Integral do Desenvolvedor' : 'Visão Operacional da Gestora'}
         </span>
       </div>
 

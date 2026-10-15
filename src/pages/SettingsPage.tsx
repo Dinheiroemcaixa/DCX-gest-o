@@ -98,7 +98,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ showToast }) => {
           </div>
           <div>
             <h2 style={{ fontSize: '15px', fontWeight: 800, color: 'var(--text-main)' }}>
-              Painel de Administração do Proprietário
+              Painel de Administração (Desenvolvedor)
             </h2>
             <p style={{ fontSize: '12.5px', color: 'var(--text-secondary)' }}>
               Apenas o seu perfil possui acesso a esta área. Aprovação de cadastros, hierarquia e políticas de acesso.
@@ -280,8 +280,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ showToast }) => {
                     </div>
                     <div>
                       <div style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        {user.name}
-                        {isSelf && <span className="badge badge-primary">Você (Proprietário)</span>}
+                        {user.role === 'proprietario' && (!user.name || user.name === 'Proprietário' || user.name === 'Proprietário do Sistema') ? 'Desenvolvedor' : user.name}
+                        {isSelf && <span className="badge badge-primary">Você (Desenvolvedor)</span>}
                         {user.role === 'gestora' && <span className="badge badge-warning">Gestora</span>}
                         {user.role === 'operador' && <span className="badge badge-neutral">Operador</span>}
                         {user.status === 'suspenso' && <span className="badge badge-danger">Conta Suspensa</span>}

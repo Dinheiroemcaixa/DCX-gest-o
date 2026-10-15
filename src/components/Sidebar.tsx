@@ -24,13 +24,13 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ activePage, setActivePage, lateTasksCount }) => {
-  const { currentUser, profiles, isProprietario, isGestora, isOperador, logout, loginAs } = useAuth()
+  const { currentUser, profiles, isProprietario, isGestora, logout } = useAuth()
 
   // Contagem de usuários pendentes de aprovação (para o badge do proprietário)
   const pendingApprovalsCount = profiles.filter(p => p.status === 'pendente').length
 
   const getRoleBadge = () => {
-    if (isProprietario) return <span className="badge badge-primary"><ShieldCheck size={12} /> Proprietário</span>
+    if (isProprietario) return <span className="badge badge-primary"><ShieldCheck size={12} /> Desenvolvedor</span>
     if (isGestora) return <span className="badge badge-warning"><Briefcase size={12} /> Gestora</span>
     return <span className="badge badge-neutral"><UserCheck size={12} /> Operador</span>
   }
@@ -201,34 +201,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activePage, setActivePage, lat
         )}
       </nav>
 
-      {/* Caixa de Alternância Rápida de Testes (Facilitador do Desenvolvedor & Usuário) */}
-      <div style={{
-        padding: '12px 14px',
-        margin: '8px 12px',
-        backgroundColor: 'var(--surface-alt)',
-        border: '1px dashed var(--border-strong)',
-        borderRadius: 'var(--radius-md)',
-        fontSize: '11px'
-      }}>
-        <div style={{ fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-          Simular Perfil no Teste:
-        </div>
-        <select
-          className="form-select"
-          style={{ padding: '4px 8px', fontSize: '11px', height: '28px' }}
-          value={currentUser?.id}
-          onChange={(e) => {
-            const selected = profiles.find(p => p.id === e.target.value)
-            if (selected) loginAs(selected)
-          }}
-        >
-          {profiles.map(p => (
-            <option key={p.id} value={p.id}>
-              {p.role.toUpperCase()} - {p.name.split(' ')[0]} ({p.status})
-            </option>
-          ))}
-        </select>
-      </div>
+
 
       {/* Perfil do Usuário Conectado */}
       <div style={{
@@ -254,7 +227,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activePage, setActivePage, lat
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-main)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {currentUser?.name}
+            {currentUser?.role === 'proprietario' && (!currentUser?.name || currentUser?.name === 'Proprietário' || currentUser?.name === 'Proprietário do Sistema') ? 'Desenvolvedor' : currentUser?.name}
           </div>
           <div style={{ marginTop: '2px' }}>
             {getRoleBadge()}

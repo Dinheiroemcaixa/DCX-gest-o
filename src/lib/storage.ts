@@ -14,7 +14,7 @@ export function initDefaultData() {
     const defaultProfiles: Profile[] = [
       {
         id: 'user-proprietario-001',
-        name: 'Proprietário do Sistema',
+        name: 'Desenvolvedor',
         email: 'proprietario@empresa.com',
         role: 'proprietario',
         status: 'aprovado',
@@ -83,7 +83,7 @@ export function initDefaultData() {
         status: 'aprovado',
         current_version: 1,
         created_by: 'user-proprietario-001',
-        created_by_name: 'Proprietário do Sistema',
+        created_by_name: 'Desenvolvedor',
         created_at: new Date().toISOString(),
         active_version: {
           id: 'v-001',
@@ -150,7 +150,7 @@ export function initDefaultData() {
         assigned_to_name: 'Carlos Oliveira (Operador)',
         assigned_to_color: '#0D9488',
         created_by: 'user-proprietario-001',
-        created_by_name: 'Proprietário do Sistema',
+        created_by_name: 'Desenvolvedor',
         due_date: today,
         all_day: false,
         start_time: '09:00',
