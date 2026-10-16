@@ -2,7 +2,15 @@ import React, { useState } from 'react'
 import type { Task, ViewMode, FilterMode, Priority, Pop } from '../types'
 import { useAuth } from '../context/AuthContext'
 import { getPops } from '../lib/storage'
-import { getTodayDateStr, formatDateBr, isDateWithinInterval } from '../lib/dateUtils'
+import { 
+  getTodayDateStr, 
+  formatDateBr, 
+  isDateWithinInterval,
+  getThisWeekRange,
+  getThisMonthRange,
+  getThisYearRange 
+} from '../lib/dateUtils'
+import { DateFilterDropdown, type DateFilterPeriod } from '../components/DateFilterDropdown'
 import { 
   List, 
   Columns, 
@@ -35,8 +43,6 @@ interface TasksPageProps {
   searchQuery: string
 }
 
-type DateFilterType = 'today' | 'specific' | 'period'
-
 export const TasksPage: React.FC<TasksPageProps> = ({
   tasks,
   onOpenEditTask,
@@ -58,11 +64,35 @@ export const TasksPage: React.FC<TasksPageProps> = ({
   const [viewMode, setViewMode] = useState<ViewMode>('list')
   const [filterMode, setFilterMode] = useState<FilterMode>('all')
   
-  // Filtro de Data: Padrão é sempre 'today' (Hoje)
-  const [dateFilterType, setDateFilterType] = useState<DateFilterType>('today')
-  const [specificDate, setSpecificDate] = useState<string>(todayStr)
-  const [periodStartDate, setPeriodStartDate] = useState<string>(todayStr)
-  const [periodEndDate, setPeriodEndDate] = useState<string>(todayStr)
+  // Filtro de Data Compacto: Padrão é sempre 'today' (Hoje)
+  const [period, setPeriod] = useState<DateFilterPeriod>('today')
+  const [startDate, setStartDate] = useState<string>(todayStr)
+  const [endDate, setEndDate] = useState<string>(todayStr)
+
+  const handleSelectPeriod = (newPeriod: DateFilterPeriod, customStart?: string, customEnd?: string) => {
+    setPeriod(newPeriod)
+    if (newPeriod === 'today') {
+      setStartDate(todayStr)
+      setEndDate(todayStr)
+    } else if (newPeriod === 'this_week') {
+      const w = getThisWeekRange()
+      setStartDate(w.start)
+      setEndDate(w.end)
+    } else if (newPeriod === 'this_month') {
+      const m = getThisMonthRange()
+      setStartDate(m.start)
+      setEndDate(m.end)
+    } else if (newPeriod === 'this_year') {
+      const y = getThisYearRange()
+      setStartDate(y.start)
+      setEndDate(y.end)
+    } else if (newPeriod === 'custom') {
+      if (customStart && customEnd) {
+        setStartDate(customStart)
+        setEndDate(customEnd)
+      }
+    }
+  }
 
   // Estado do mês no Calendário
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => new Date())
@@ -77,17 +107,9 @@ export const TasksPage: React.FC<TasksPageProps> = ({
     // Não lista tarefas concluídas na visualização ativa
     if (t.status === 'Concluida') return false
 
-    if (dateFilterType === 'today') {
-      // Exclusivamente as tarefas com vencimento hoje (não lista futuro indiscriminadamente)
-      return t.due_date === todayStr
-    } else if (dateFilterType === 'specific') {
-      // Dia específico selecionado
-      return t.due_date === specificDate
-    } else if (dateFilterType === 'period') {
-      // Intervalo entre data inicial e data final (inclusivo)
-      return isDateWithinInterval(t.due_date, periodStartDate, periodEndDate)
-    }
-    return true
+    // Filtra pelo intervalo selecionado [startDate, endDate] (inclusivo)
+    // Para 'today', startDate === endDate === todayStr, filtrando exatamente as tarefas de hoje
+    return isDateWithinInterval(t.due_date, startDate, endDate)
   })
 
   // 5. Filtro de Status Adicional
@@ -123,8 +145,9 @@ export const TasksPage: React.FC<TasksPageProps> = ({
   }
 
   const handleSelectDayInCalendar = (dateStr: string) => {
-    setSpecificDate(dateStr)
-    setDateFilterType('specific')
+    setPeriod('custom')
+    setStartDate(dateStr)
+    setEndDate(dateStr)
   }
 
   // Calendário Mensal
@@ -146,8 +169,8 @@ export const TasksPage: React.FC<TasksPageProps> = ({
     for (let d = 1; d <= daysInMonth; d++) {
       const currentDayStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
       const isToday = currentDayStr === todayStr
-      const isSelected = (dateFilterType === 'specific' && currentDayStr === specificDate) || (dateFilterType === 'today' && isToday)
-      const isInPeriod = dateFilterType === 'period' && isDateWithinInterval(currentDayStr, periodStartDate, periodEndDate)
+      const isSelected = startDate === endDate && currentDayStr === startDate
+      const isInPeriod = startDate !== endDate && isDateWithinInterval(currentDayStr, startDate, endDate)
       const dayTasks = myTasks.filter(t => t.due_date === currentDayStr && t.status !== 'Concluida')
 
       days.push(
@@ -262,125 +285,7 @@ export const TasksPage: React.FC<TasksPageProps> = ({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      {/* ── BARRA DE CONTROLE DE DATA / PERÍODO (NOVA) ────────────────────── */}
-      <div style={{
-        backgroundColor: 'var(--surface)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-lg)',
-        padding: '14px 18px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        flexWrap: 'wrap',
-        gap: '12px'
-      }}>
-        {/* Seletor dos Três Modos de Data */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '12.5px', fontWeight: 700, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <CalendarDays size={16} color="var(--primary)" />
-            Filtro de Data:
-          </span>
-
-          {/* Opção 1: Hoje */}
-          <button
-            className={`btn btn-sm ${dateFilterType === 'today' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setDateFilterType('today')}
-            title="Exibe as tarefas programadas para hoje"
-          >
-            Hoje ({formatDateBr(todayStr)})
-          </button>
-
-          {/* Opção 2: Dia Específico */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <button
-              className={`btn btn-sm ${dateFilterType === 'specific' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setDateFilterType('specific')}
-            >
-              Dia Específico:
-            </button>
-            <input
-              type="date"
-              className="form-input"
-              style={{ width: '135px', padding: '4px 8px', fontSize: '12px' }}
-              value={specificDate}
-              onChange={(e) => {
-                setSpecificDate(e.target.value)
-                setDateFilterType('specific')
-              }}
-            />
-          </div>
-
-          {/* Opção 3: Período de Datas */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-            <button
-              className={`btn btn-sm ${dateFilterType === 'period' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setDateFilterType('period')}
-            >
-              Período:
-            </button>
-            <input
-              type="date"
-              className="form-input"
-              style={{ width: '130px', padding: '4px 8px', fontSize: '12px' }}
-              value={periodStartDate}
-              onChange={(e) => {
-                setPeriodStartDate(e.target.value)
-                setDateFilterType('period')
-              }}
-            />
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>até</span>
-            <input
-              type="date"
-              className="form-input"
-              style={{ width: '130px', padding: '4px 8px', fontSize: '12px' }}
-              value={periodEndDate}
-              onChange={(e) => {
-                setPeriodEndDate(e.target.value)
-                setDateFilterType('period')
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Botão de Retorno Rápido para Hoje (se estiver filtrando outra data) */}
-        {dateFilterType !== 'today' && (
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => setDateFilterType('today')}
-            style={{ color: 'var(--primary)', fontWeight: 600 }}
-          >
-            <RotateCcw size={14} />
-            Voltar para Hoje
-          </button>
-        )}
-      </div>
-
-      {/* Indicador Textual Amigável da Consulta Atual */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 4px',
-        fontSize: '12.5px',
-        color: 'var(--text-secondary)'
-      }}>
-        <div>
-          {dateFilterType === 'today' && (
-            <span>📅 Exibindo <strong>tarefas de hoje ({formatDateBr(todayStr)})</strong></span>
-          )}
-          {dateFilterType === 'specific' && (
-            <span>📅 Exibindo <strong>dia específico: {formatDateBr(specificDate)}</strong></span>
-          )}
-          {dateFilterType === 'period' && (
-            <span>📅 Exibindo período de <strong>{formatDateBr(periodStartDate)}</strong> até <strong>{formatDateBr(periodEndDate)}</strong></span>
-          )}
-        </div>
-        <div>
-          Total listado: <strong>{filtered.length} {filtered.length === 1 ? 'tarefa' : 'tarefas'}</strong>
-        </div>
-      </div>
-
-      {/* ── BARRA DE FILTROS DE STATUS E MODOS DE VISUALIZAÇÃO ──────────────── */}
+      {/* ── BARRA UNIFICADA DE FILTROS E CONTROLES ──────────────── */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -392,51 +297,71 @@ export const TasksPage: React.FC<TasksPageProps> = ({
         borderRadius: 'var(--radius-lg)',
         padding: '12px 18px'
       }}>
-        {/* Filtros de Status */}
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-          {[
-            { id: 'all', label: 'Todas do Filtro' },
-            { id: 'open', label: 'Em Aberto' },
-            { id: 'in_progress', label: 'Em Andamento' },
-            { id: 'late', label: 'Atrasadas' },
-            { id: 'high', label: 'Alta Prioridade' },
-          ].map(f => (
-            <button
-              key={f.id}
-              className={`btn btn-sm ${filterMode === f.id ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => setFilterMode(f.id as FilterMode)}
-            >
-              {f.label}
-            </button>
-          ))}
+        {/* Lado Esquerdo: Controle Compacto de Data + Filtros de Status */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          {/* Controle Compacto (ex: 15/10/2026 ▾) */}
+          <DateFilterDropdown
+            period={period}
+            startDate={startDate}
+            endDate={endDate}
+            todayStr={todayStr}
+            onSelectPeriod={handleSelectPeriod}
+          />
+
+          <div style={{ width: '1px', height: '22px', backgroundColor: 'var(--border)' }} />
+
+          {/* Filtros de Status */}
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+            {[
+              { id: 'all', label: 'Todas do Filtro' },
+              { id: 'open', label: 'Em Aberto' },
+              { id: 'in_progress', label: 'Em Andamento' },
+              { id: 'late', label: 'Atrasadas' },
+              { id: 'high', label: 'Alta Prioridade' },
+            ].map(f => (
+              <button
+                key={f.id}
+                className={`btn btn-sm ${filterMode === f.id ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setFilterMode(f.id as FilterMode)}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* Alternador de Modo de Visualização */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', backgroundColor: 'var(--surface-alt)', padding: '3px', borderRadius: 'var(--radius-md)' }}>
-          <button
-            className={`btn btn-sm ${viewMode === 'list' ? 'btn-secondary' : 'btn-ghost'}`}
-            style={{ padding: '6px 10px' }}
-            onClick={() => setViewMode('list')}
-            title="Visualização em Lista"
-          >
-            <List size={16} />
-          </button>
-          <button
-            className={`btn btn-sm ${viewMode === 'kanban' ? 'btn-secondary' : 'btn-ghost'}`}
-            style={{ padding: '6px 10px' }}
-            onClick={() => setViewMode('kanban')}
-            title="Visualização em Kanban"
-          >
-            <Columns size={16} />
-          </button>
-          <button
-            className={`btn btn-sm ${viewMode === 'calendar' ? 'btn-secondary' : 'btn-ghost'}`}
-            style={{ padding: '6px 10px' }}
-            onClick={() => setViewMode('calendar')}
-            title="Visualização em Calendário"
-          >
-            <CalIcon size={16} />
-          </button>
+        {/* Lado Direito: Total de tarefas + Alternador de Visualização */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <span style={{ fontSize: '12.5px', color: 'var(--text-secondary)', fontWeight: 600 }}>
+            Total: <strong>{filtered.length}</strong> {filtered.length === 1 ? 'tarefa' : 'tarefas'}
+          </span>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', backgroundColor: 'var(--surface-alt)', padding: '3px', borderRadius: 'var(--radius-md)' }}>
+            <button
+              className={`btn btn-sm ${viewMode === 'list' ? 'btn-secondary' : 'btn-ghost'}`}
+              style={{ padding: '6px 10px' }}
+              onClick={() => setViewMode('list')}
+              title="Visualização em Lista"
+            >
+              <List size={16} />
+            </button>
+            <button
+              className={`btn btn-sm ${viewMode === 'kanban' ? 'btn-secondary' : 'btn-ghost'}`}
+              style={{ padding: '6px 10px' }}
+              onClick={() => setViewMode('kanban')}
+              title="Visualização em Kanban"
+            >
+              <Columns size={16} />
+            </button>
+            <button
+              className={`btn btn-sm ${viewMode === 'calendar' ? 'btn-secondary' : 'btn-ghost'}`}
+              style={{ padding: '6px 10px' }}
+              onClick={() => setViewMode('calendar')}
+              title="Visualização em Calendário"
+            >
+              <CalIcon size={16} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -450,8 +375,8 @@ export const TasksPage: React.FC<TasksPageProps> = ({
                 Nenhuma tarefa para o período selecionado!
               </div>
               <div style={{ fontSize: '12.5px', marginTop: '4px' }}>
-                {dateFilterType === 'today'
-                  ? 'Você não possui tarefas pendentes para hoje. Use os filtros de data para consultar outros dias ou adicione uma nova tarefa.'
+                {period === 'today'
+                  ? 'Você não possui tarefas pendentes para hoje. Use o filtro de data para consultar outros períodos ou adicione uma nova tarefa.'
                   : 'Nenhuma atividade encontrada para os critérios informados.'}
               </div>
             </div>
@@ -779,9 +704,13 @@ export const TasksPage: React.FC<TasksPageProps> = ({
           {/* Lista de Tarefas do Dia Selecionado no Calendário */}
           <div style={{ marginTop: '24px', paddingTop: '18px', borderTop: '1px solid var(--border)' }}>
             <h4 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '12px' }}>
-              {dateFilterType === 'today' && `Tarefas Agendadas para Hoje (${formatDateBr(todayStr)}) (${filtered.length})`}
-              {dateFilterType === 'specific' && `Tarefas Agendadas para ${formatDateBr(specificDate)} (${filtered.length})`}
-              {dateFilterType === 'period' && `Tarefas Agendadas para o Período (${formatDateBr(periodStartDate)} até ${formatDateBr(periodEndDate)}) (${filtered.length})`}
+              {period === 'today' && `Tarefas Agendadas para Hoje (${formatDateBr(todayStr)}) (${filtered.length})`}
+              {period === 'this_week' && `Tarefas da Semana (${formatDateBr(startDate)} até ${formatDateBr(endDate)}) (${filtered.length})`}
+              {period === 'this_month' && `Tarefas do Mês (${formatDateBr(startDate)} até ${formatDateBr(endDate)}) (${filtered.length})`}
+              {period === 'this_year' && `Tarefas do Ano (${formatDateBr(startDate)} até ${formatDateBr(endDate)}) (${filtered.length})`}
+              {period === 'custom' && (startDate === endDate 
+                ? `Tarefas do Dia ${formatDateBr(startDate)} (${filtered.length})`
+                : `Tarefas do Período (${formatDateBr(startDate)} até ${formatDateBr(endDate)}) (${filtered.length})`)}
             </h4>
 
             {filtered.length === 0 ? (
